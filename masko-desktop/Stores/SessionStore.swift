@@ -1,0 +1,320 @@
+import Foundation
+
+struct ClaudeSession: Identifiable, Codable {
+    let id: String // session_id from Claude Code
+    let projectDir: String?
+    let projectName: String?
+    var status: Status
+    var phase: Phase = .idle
+    var eventCount: Int
+    var startedAt: Date
+    var lastEventAt: Date?
+    var lastToolName: String?
+    var activeSubagentCount: Int = 0
+    var isCompacting: Bool = false
+    var terminalPid: Int?
+    var transcriptPath: String?
+
+    enum Status: String, Codable {
+        case active, ended
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = raw == "active" ? .active : .ended
+        }
+    }
+
+    enum Phase: String, Codable {
+        case idle       // After Stop or SessionStart — waiting for user input
+        case running    // After UserPromptSubmit or tool use — agent is working
+        case compacting // After PreCompact — context compaction in progress
+    }
+}
+
+@Observable
+final class SessionStore {
+    private(set) var sessions: [ClaudeSession] = []
+    private static let filename = "sessions.json"
+    private var reconcileTimer: Timer?
+    private var interruptWatcherTimer: Timer?
+
+    /// Called when interrupt detection flips a running session to idle.
+    /// Wire this to refresh overlay inputs.
+    var onPhasesChanged: (() -> Void)?
+
+    init() {
+        sessions = LocalStorage.load([ClaudeSession].self, from: Self.filename) ?? []
+        reconcileIfNeeded()
+        startReconcileTimer()
+        startInterruptWatcher()
+    }
+
+    /// Safety net: check every 2 minutes if Claude processes are still alive.
+    /// Catches the edge case where SessionEnd hook was never delivered (crash, SIGKILL).
+    private func startReconcileTimer() {
+        reconcileTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.reconcileIfNeeded()
+            }
+        }
+    }
+
+    /// Check every 3 seconds if any running sessions were interrupted.
+    /// Claude Code does not fire a hook on user interrupt, but it does write
+    /// `[Request interrupted by user]` to the transcript JSONL file.
+    private func startInterruptWatcher() {
+        interruptWatcherTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.checkForInterrupts()
+            }
+        }
+    }
+
+    /// Read the tail of each running session's transcript to detect interrupts.
+    private func checkForInterrupts() {
+        let running = sessions.indices.filter {
+            sessions[$0].status == .active && sessions[$0].phase == .running && sessions[$0].transcriptPath != nil
+        }
+        guard !running.isEmpty else { return }
+
+        var changed = false
+        for i in running {
+            guard let path = sessions[i].transcriptPath else { continue }
+            if Self.transcriptIndicatesInterrupt(path: path, since: sessions[i].lastEventAt) {
+                sessions[i].phase = .idle
+                sessions[i].isCompacting = false
+                changed = true
+                print("[masko-desktop] Interrupt detected for session \(sessions[i].id) via transcript")
+            }
+        }
+        if changed {
+            persist()
+            onPhasesChanged?()
+        }
+    }
+
+    /// Read the last ~4KB of a transcript JSONL file and check if the most recent
+    /// non-progress entry is `[Request interrupted by user]`.
+    private static func transcriptIndicatesInterrupt(path: String, since lastEventAt: Date?) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { handle.closeFile() }
+
+        let fileSize = handle.seekToEndOfFile()
+        guard fileSize > 0 else { return false }
+        let readSize = min(UInt64(4096), fileSize)
+        handle.seek(toFileOffset: fileSize - readSize)
+        let data = handle.readDataToEndOfFile()
+
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+
+        // Walk backwards to find the last meaningful entry (skip "progress" lines)
+        for line in lines.reversed() {
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+
+            let type = obj["type"] as? String ?? ""
+            if type == "progress" || type == "file-history-snapshot" || type == "summary" { continue }
+
+            // Check timestamp — only act on entries newer than our last hook event
+            if let timestamp = obj["timestamp"] as? String, let lastEventAt {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let entryDate = formatter.date(from: timestamp), entryDate <= lastEventAt {
+                    return false // This entry is older than our last event — stale
+                }
+            }
+
+            // Check if this is an interrupt entry
+            if type == "user",
+               let message = obj["message"] as? [String: Any],
+               let content = message["content"] as? [[String: Any]],
+               let firstItem = content.first,
+               let text = firstItem["text"] as? String,
+               text.contains("[Request interrupted by user]"),
+               !text.contains("for tool use") {
+                return true
+            }
+
+            // Found a non-progress, non-interrupt entry — session is not interrupted
+            return false
+        }
+        return false
+    }
+
+    // MARK: - Crash Recovery
+
+    /// Check for crashed Claude processes and mark orphaned sessions as ended.
+    /// Called on init and when the app comes to foreground.
+    func reconcileIfNeeded() {
+        guard !activeSessions.isEmpty else { return }
+
+        var changed = false
+
+        // 1. If no Claude process at all, end everything
+        let hasClaudeProcess = checkForClaudeProcesses()
+        if !hasClaudeProcess {
+            for i in sessions.indices where sessions[i].status == .active {
+                sessions[i].status = .ended
+                sessions[i].phase = .idle
+                sessions[i].activeSubagentCount = 0
+                sessions[i].isCompacting = false
+                changed = true
+            }
+        } else {
+            // 2. End individual sessions that are stale (no events in 10+ minutes).
+            // A claude process exists for a different session — but these old ones are dead.
+            let staleThreshold: TimeInterval = 600 // 10 minutes
+            let now = Date()
+            for i in sessions.indices where sessions[i].status == .active {
+                if let lastEvent = sessions[i].lastEventAt,
+                   now.timeIntervalSince(lastEvent) > staleThreshold {
+                    sessions[i].status = .ended
+                    sessions[i].phase = .idle
+                    sessions[i].activeSubagentCount = 0
+                    sessions[i].isCompacting = false
+                    changed = true
+                }
+            }
+        }
+
+        if changed {
+            persist()
+            onPhasesChanged?()
+        }
+    }
+
+    /// Check if any `claude` CLI processes are running via pgrep (exact name match)
+    private func checkForClaudeProcesses() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-x", "claude"] // exact match — won't match masko-desktop
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0 // 0 = found matches
+        } catch {
+            return false
+        }
+    }
+
+    // MARK: - Persistence
+
+    private func persist() {
+        LocalStorage.save(sessions, to: Self.filename)
+    }
+
+    // MARK: - Computed Properties
+
+    var activeSessions: [ClaudeSession] {
+        sessions.filter { $0.status == .active }
+    }
+
+    var runningSessions: [ClaudeSession] {
+        activeSessions.filter { $0.phase == .running }
+    }
+
+    var idleSessions: [ClaudeSession] {
+        activeSessions.filter { $0.phase == .idle }
+    }
+
+    var totalActiveSubagents: Int {
+        activeSessions.reduce(0) { $0 + $1.activeSubagentCount }
+    }
+
+    var totalCompactCount: Int {
+        activeSessions.filter { $0.isCompacting }.count
+    }
+
+    // MARK: - Event Recording
+
+    func recordEvent(_ event: ClaudeEvent) {
+        guard let sessionId = event.sessionId, !sessionId.isEmpty else { return }
+
+        if let index = sessions.firstIndex(where: { $0.id == sessionId }) {
+            sessions[index].eventCount += 1
+            sessions[index].lastEventAt = Date()
+            if let toolName = event.toolName {
+                sessions[index].lastToolName = toolName
+            }
+            if let path = event.transcriptPath, sessions[index].transcriptPath == nil {
+                sessions[index].transcriptPath = path
+            }
+
+            // Only SessionStart can reactivate an ended session
+            if sessions[index].status == .ended {
+                if event.eventType == .sessionStart {
+                    sessions[index].status = .active
+                    sessions[index].phase = .idle
+                    sessions[index].isCompacting = false
+                    sessions[index].activeSubagentCount = 0
+                } else {
+                    // Stale event for ended session — count it but skip transitions
+                    persist()
+                    return
+                }
+            }
+
+            // State machine transitions
+            switch event.eventType {
+            case .sessionStart:
+                sessions[index].status = .active
+                sessions[index].phase = .idle
+                sessions[index].isCompacting = false
+                if let pid = event.terminalPid {
+                    sessions[index].terminalPid = pid
+                }
+
+            case .userPromptSubmit:
+                sessions[index].phase = .running
+
+            case .preToolUse, .postToolUse, .postToolUseFailure, .permissionRequest:
+                // Tool activity confirms agent is working
+                sessions[index].phase = .running
+
+            case .preCompact:
+                sessions[index].phase = .compacting
+                sessions[index].isCompacting = true
+
+            case .stop:
+                sessions[index].phase = .idle
+                sessions[index].isCompacting = false
+
+            case .sessionEnd:
+                sessions[index].status = .ended
+                sessions[index].phase = .idle
+                sessions[index].activeSubagentCount = 0
+                sessions[index].isCompacting = false
+
+            case .subagentStart:
+                sessions[index].activeSubagentCount += 1
+
+            case .subagentStop:
+                sessions[index].activeSubagentCount = max(0, sessions[index].activeSubagentCount - 1)
+
+            default:
+                break
+            }
+        } else {
+            // New session
+            let phase: ClaudeSession.Phase = event.eventType == .userPromptSubmit ? .running : .idle
+            var session = ClaudeSession(
+                id: sessionId,
+                projectDir: event.cwd,
+                projectName: event.projectName,
+                status: .active,
+                phase: phase,
+                eventCount: 1,
+                startedAt: Date(),
+                lastEventAt: Date()
+            )
+            session.terminalPid = event.terminalPid
+            session.transcriptPath = event.transcriptPath
+            sessions.insert(session, at: 0)
+        }
+        persist()
+    }
+}
