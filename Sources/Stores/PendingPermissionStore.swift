@@ -244,44 +244,71 @@ struct PendingPermission: Identifiable {
         return Self.readLatestPlanFile()
     }
 
-    /// Search transcript JSONL (last ~200 lines) for the plan file path
+    /// Search transcript tail (~64KB) for the plan file path.
+    /// Reads only the end of the file to avoid loading multi-MB transcripts into memory.
     private static func findPlanPath(inTranscript path: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let text = String(data: data, encoding: .utf8) else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { handle.closeFile() }
 
-        // Read last ~200 lines to find plan path mention
-        let lines = text.split(separator: "\n").suffix(200)
-        let joined = lines.joined(separator: "\n")
+        let fileSize = handle.seekToEndOfFile()
+        guard fileSize > 0 else { return nil }
+        let readSize = min(UInt64(65536), fileSize)
+        handle.seek(toFileOffset: fileSize - readSize)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
 
-        // Pattern: plan file at /.../.claude/plans/something.md
-        // or "plan file...at: /path"
-        let patterns = [
-            "plans/[a-z0-9-]+\\.md",
-        ]
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: "\\.claude/\(pattern)"),
-               let match = regex.firstMatch(in: joined, range: NSRange(joined.startIndex..., in: joined)),
-               let range = Range(match.range, in: joined) {
-                let relative = String(joined[range])
-                let home = FileManager.default.homeDirectoryForCurrentUser.path
-                let fullPath = "\(home)/\(relative)"
-                if FileManager.default.fileExists(atPath: fullPath) {
-                    return fullPath
-                }
-            }
+        // Match both global (~/.claude/plans/) and project-specific (~/.claude/projects/.../plans/) paths
+        guard let regex = try? NSRegularExpression(pattern: "\\.claude/(?:projects/[^/]+/)?plans/[a-z0-9-]+\\.md") else {
+            return nil
+        }
+
+        // Search all matches, take the last one (most recent mention)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard let lastMatch = matches.last, let range = Range(lastMatch.range, in: text) else {
+            return nil
+        }
+
+        let relative = String(text[range])
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fullPath = "\(home)/\(relative)"
+        if FileManager.default.fileExists(atPath: fullPath) {
+            return fullPath
         }
         return nil
     }
 
-    /// Fallback: read most recently modified plan file
+    /// Fallback: read most recently modified plan file from all plan directories
     private static func readLatestPlanFile() -> String? {
-        let plansDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/plans")
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: plansDir, includingPropertiesForKeys: [.contentModificationDateKey]
-        ) else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var candidates: [URL] = []
 
-        let sorted = files.filter { $0.pathExtension == "md" }.sorted { a, b in
+        // Global plans directory
+        let globalDir = home.appendingPathComponent(".claude/plans")
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: globalDir, includingPropertiesForKeys: [.contentModificationDateKey]
+        ) {
+            candidates.append(contentsOf: files.filter { $0.pathExtension == "md" })
+        }
+
+        // Project-specific plan directories
+        let projectsDir = home.appendingPathComponent(".claude/projects")
+        if let projects = try? FileManager.default.contentsOfDirectory(
+            at: projectsDir, includingPropertiesForKeys: nil
+        ) {
+            for project in projects {
+                let plansDir = project.appendingPathComponent("plans")
+                if let files = try? FileManager.default.contentsOfDirectory(
+                    at: plansDir, includingPropertiesForKeys: [.contentModificationDateKey]
+                ) {
+                    candidates.append(contentsOf: files.filter { $0.pathExtension == "md" })
+                }
+            }
+        }
+
+        guard !candidates.isEmpty else { return nil }
+
+        let sorted = candidates.sorted { a, b in
             let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             return dateA > dateB

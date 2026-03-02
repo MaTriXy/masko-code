@@ -122,8 +122,18 @@ final class SessionStore {
             if let timestamp = obj["timestamp"] as? String, let lastEventAt {
                 let formatter = ISO8601DateFormatter()
                 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                if let entryDate = formatter.date(from: timestamp), entryDate <= lastEventAt {
+                var entryDate = formatter.date(from: timestamp)
+                if entryDate == nil {
+                    // Retry without fractional seconds
+                    formatter.formatOptions = [.withInternetDateTime]
+                    entryDate = formatter.date(from: timestamp)
+                }
+                if let entryDate, entryDate <= lastEventAt {
                     return false // This entry is older than our last event — stale
+                }
+                // If timestamp still can't be parsed, treat as stale to avoid false positives
+                if entryDate == nil {
+                    return false
                 }
             }
 
