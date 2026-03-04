@@ -1,0 +1,30 @@
+excluded:
+  - .build
+  - build
+
+disabled_rules:
+  - trailing_whitespace
+  - trailing_comma
+  - line_length
+  - type_body_length
+  - file_length
+  - function_body_length
+  - cyclomatic_complexity
+  - nesting
+  - large_tuple
+  - type_name
+  - for_where
+  - multiple_closures_with_trailing_closure  # Very common in SwiftUI
+  - implicit_optional_initialization
+
+# Allow short variable names common in Swift (i, x, y, fm, sm, etc.)
+identifier_name:
+  min_length: 1
+  max_length: 60
+
+opt_in_rules:
+  - closure_spacing
+  - contains_over_first_not_nil
+  - overridden_super_call
+  - redundant_nil_coalescing
+  - unowned_variable_capture

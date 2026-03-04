@@ -191,13 +191,32 @@ struct OnboardingView: View {
                     .font(Constants.heading(size: 24, weight: .bold))
                     .foregroundStyle(Constants.textPrimary)
 
-                let ideNames = ExtensionInstaller.availableIDEs().map(\.name).joined(separator: " or ")
-                Text("Install a tiny extension so clicking a session in Masko jumps to the exact terminal tab in \(ideNames).")
+                Text("Install a tiny extension so clicking a session in Masko jumps to the exact terminal tab.")
                     .font(Constants.body(size: 14))
                     .foregroundStyle(Constants.textMuted)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
+            }
+
+            // Per-IDE detection list
+            VStack(spacing: 6) {
+                let detectedIDEs = ExtensionInstaller.availableIDEs()
+                ForEach(detectedIDEs, id: \.command) { ide in
+                    HStack(spacing: 8) {
+                        Image(systemName: ideExtensionInstalled ? "checkmark.circle.fill" : "circle.fill")
+                            .foregroundStyle(ideExtensionInstalled ? .green : Constants.orangePrimary)
+                            .font(.system(size: 10))
+                        Text(ide.name)
+                            .font(Constants.body(size: 14, weight: .medium))
+                            .foregroundStyle(Constants.textPrimary)
+                        Spacer()
+                        Text("Detected")
+                            .font(Constants.body(size: 12))
+                            .foregroundStyle(Constants.textMuted)
+                    }
+                    .padding(.horizontal, 30)
+                }
             }
 
             if let error = ideExtensionError {
@@ -207,14 +226,6 @@ struct OnboardingView: View {
             }
 
             if ideExtensionInstalled {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("Extension installed")
-                        .font(Constants.body(size: 14, weight: .medium))
-                        .foregroundStyle(.green)
-                }
-
                 primaryButton("Continue") {
                     nextStep(after: 3)
                 }
@@ -411,7 +422,7 @@ struct PresetPickerCard: View {
                 }
                 .frame(height: 80)
 
-                Text("\(preset.emoji) \(presetConfig?.name ?? preset.slug)")
+                Text(presetConfig?.name ?? preset.slug)
                     .font(Constants.body(size: 12, weight: .medium))
                     .foregroundStyle(Constants.textPrimary)
                     .lineLimit(1)

@@ -54,6 +54,7 @@ enum IDETerminalFocus {
             "com.mitchellh.ghostty",
             "org.alacritty",
             "dev.warp.Warp-Stable",
+            "com.google.antigravity",
         ]
         for id in bundleIDs {
             if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == id }) {

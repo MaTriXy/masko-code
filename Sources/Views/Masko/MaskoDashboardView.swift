@@ -10,7 +10,7 @@ struct NativeTextEditor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
-        let textView = scrollView.documentView as! NSTextView
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
 
         textView.delegate = context.coordinator
         textView.font = font
@@ -40,7 +40,7 @@ struct NativeTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        let textView = scrollView.documentView as! NSTextView
+        guard let textView = scrollView.documentView as? NSTextView else { return }
         if textView.string != text {
             textView.string = text
         }
@@ -181,6 +181,20 @@ struct MaskoDashboardView: View {
         )
     }
 
+    private var snoozeLabel: String {
+        guard let end = overlayManager.snoozeEndDate else { return "Snoozed" }
+        if end == .distantFuture { return "Snoozed" }
+        let remaining = Int(end.timeIntervalSinceNow)
+        if remaining <= 0 { return "Snoozed" }
+        if remaining < 60 { return "Snoozed — <1 min left" }
+        let minutes = remaining / 60
+        if minutes < 60 { return "Snoozed — \(minutes) min left" }
+        let hours = minutes / 60
+        let mins = minutes % 60
+        if mins == 0 { return "Snoozed — \(hours)h left" }
+        return "Snoozed — \(hours)h \(mins)m left"
+    }
+
     var body: some View {
         if let mascotId = selectedMascotId {
             MascotDetailView(
@@ -202,7 +216,26 @@ struct MaskoDashboardView: View {
 
                 Spacer()
 
-                if overlayManager.isOverlayActive {
+                if overlayManager.isSnoozed {
+                    Button(action: { overlayManager.wakeFromSnooze() }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "moon.zzz.fill")
+                                .font(.system(size: 12))
+                            Text(snoozeLabel)
+                                .font(Constants.body(size: 13, weight: .medium))
+                        }
+                        .foregroundColor(Constants.orangePrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Constants.orangePrimary.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: Constants.cornerRadiusSmall))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Constants.cornerRadiusSmall)
+                                .stroke(Constants.orangePrimary.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                } else if overlayManager.isOverlayActive {
                     Button(action: { overlayManager.hideOverlay() }) {
                         HStack(spacing: 5) {
                             Image(systemName: "eye.slash")
@@ -241,72 +274,13 @@ struct MaskoDashboardView: View {
             .padding(.top, 16)
             .padding(.bottom, 12)
 
-            if appStore.mascotStore.mascots.isEmpty {
-                emptyView
-            } else {
-                mascotListView
-            }
+            mascotListView
         }
         .background(Constants.lightBackground)
         .navigationTitle("")
         .sheet(isPresented: $showingAddSheet) {
             addMascotSheet
         }
-    }
-
-    // MARK: - Empty State
-
-    private var emptyView: some View {
-        VStack(spacing: 20) {
-            Spacer()
-
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 40))
-                .foregroundColor(Constants.orangePrimary.opacity(0.4))
-            Text("No Mascots Yet")
-                .font(Constants.heading(size: 22, weight: .semibold))
-                .foregroundColor(Constants.textPrimary)
-
-            VStack(spacing: 8) {
-                Text("Create your own AI mascot on masko.ai")
-                    .font(Constants.body(size: 14))
-                    .foregroundColor(Constants.textMuted)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Create a collection on masko.ai", systemImage: "1.circle.fill")
-                    Label("Open the Canvas editor", systemImage: "2.circle.fill")
-                    Label("Choose the \"Claude Code\" template", systemImage: "3.circle.fill")
-                    Label("Export and paste the config here", systemImage: "4.circle.fill")
-                }
-                .font(Constants.body(size: 13))
-                .foregroundColor(Constants.textMuted)
-            }
-            .multilineTextAlignment(.center)
-
-            HStack(spacing: 10) {
-                Button(action: {
-                    NSWorkspace.shared.open(URL(string: "\(Constants.maskoBaseURL)/collections")!)
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "paintbrush.pointed.fill")
-                        Text("Create Your Mascot")
-                    }
-                }
-                .buttonStyle(BrandPrimaryButton())
-
-                Button(action: { showingAddSheet = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc.on.clipboard")
-                        Text("Paste JSON")
-                    }
-                }
-                .buttonStyle(BrandSecondaryButton())
-            }
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(20)
     }
 
     // MARK: - Mascot List
@@ -334,6 +308,7 @@ struct MaskoDashboardView: View {
                         }
                     )
                 }
+
             }
             .padding(20)
 
@@ -384,7 +359,7 @@ struct MaskoDashboardView: View {
     private var addMascotSheet: some View {
         VStack(spacing: 16) {
             HStack {
-                Text("Add Mascot")
+                Text("Import JSON")
                     .font(Constants.heading(size: 18, weight: .semibold))
                     .foregroundColor(Constants.textPrimary)
                 Spacer()
@@ -399,48 +374,10 @@ struct MaskoDashboardView: View {
                 .buttonStyle(.plain)
             }
 
-            Text("Paste config JSON from the canvas export, or add a preset")
+            Text("Paste config JSON exported from the masko.ai canvas editor")
                 .font(Constants.body(size: 13))
                 .foregroundColor(Constants.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Preset buttons
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Presets")
-                    .font(Constants.body(size: 12, weight: .medium))
-                    .foregroundColor(Constants.textMuted)
-
-                let available = appStore.mascotStore.availablePresets
-                if available.isEmpty {
-                    Text("All presets added")
-                        .font(Constants.body(size: 12))
-                        .foregroundColor(Constants.textMuted.opacity(0.6))
-                } else {
-                    HStack(spacing: 8) {
-                        ForEach(available) { preset in
-                            Button(action: { addPresetDirectly(preset) }) {
-                                HStack(spacing: 4) {
-                                    Text(preset.emoji)
-                                        .font(.system(size: 11))
-                                    Text(MascotStore.loadBundledConfig(named: preset.filename)?.name ?? preset.slug)
-                                        .font(Constants.body(size: 12, weight: .medium))
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Color(red: 139/255, green: 92/255, blue: 246/255).opacity(0.1))
-                                .foregroundColor(Color(red: 139/255, green: 92/255, blue: 246/255))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color(red: 139/255, green: 92/255, blue: 246/255).opacity(0.3), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Spacer()
-                    }
-                }
-            }
 
             NativeTextEditor(text: $jsonText, placeholder: "Paste JSON here...")
                 .clipShape(RoundedRectangle(cornerRadius: Constants.cornerRadius))
@@ -456,7 +393,7 @@ struct MaskoDashboardView: View {
             }
 
             Button(action: addMascot) {
-                Text("Add Mascot")
+                Text("Import")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(BrandPrimaryButton(
@@ -465,22 +402,11 @@ struct MaskoDashboardView: View {
             .disabled(jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(20)
-        .frame(width: 460, height: 360)
+        .frame(width: 460, height: 320)
         .background(Constants.lightBackground)
     }
 
     // MARK: - Actions
-
-    private func addPresetDirectly(_ preset: PresetInfo) {
-        Task {
-            await appStore.mascotStore.addPreset(slug: preset.slug)
-            await MainActor.run {
-                showingAddSheet = false
-                jsonText = ""
-                parseError = nil
-            }
-        }
-    }
 
     private func addMascot() {
         parseError = nil

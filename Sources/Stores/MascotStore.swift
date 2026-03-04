@@ -13,7 +13,6 @@ struct SavedMascot: Identifiable, Codable {
 struct PresetInfo: Identifiable {
     let slug: String
     let filename: String // bundle resource name (no .json)
-    let emoji: String
 
     var id: String { slug }
 }
@@ -23,15 +22,15 @@ final class MascotStore {
     private(set) var mascots: [SavedMascot] = []
     private static let filename = "mascots.json"
 
-    private static let seedVersion = 4 // Bump to re-apply default config on next launch
+    private static let seedVersion = 5 // Bump to re-apply default config on next launch
 
     /// The 5 base mascot presets. Replace placeholder entries with real configs when ready.
     static let presets: [PresetInfo] = [
-        PresetInfo(slug: "madame-patate", filename: "madame-patate", emoji: "🥔"),
-        PresetInfo(slug: "otto", filename: "otto", emoji: "🐙"),
-        PresetInfo(slug: "cupidon", filename: "cupidon", emoji: "💘"),
-        PresetInfo(slug: "masko", filename: "masko", emoji: "⚡"),
-        PresetInfo(slug: "rusty", filename: "rusty", emoji: "🤖"),
+        PresetInfo(slug: "madame-patate", filename: "madame-patate"),
+        PresetInfo(slug: "otto", filename: "otto"),
+        PresetInfo(slug: "cupidon", filename: "cupidon"),
+        PresetInfo(slug: "masko", filename: "masko"),
+        PresetInfo(slug: "rusty", filename: "rusty"),
     ]
 
     /// Presets not yet added by the user.
@@ -50,20 +49,21 @@ final class MascotStore {
     }
 
     private func seedDefaults() {
-        // Seed the first preset for new users
-        let firstPreset = Self.presets[0]
+        // Seed all presets for new users
         Task {
-            if let config = await Self.fetchRemoteConfig(slug: firstPreset.slug) {
-                await MainActor.run {
-                    self.addFromPreset(config: config, slug: firstPreset.slug)
-                    UserDefaults.standard.set(Self.seedVersion, forKey: "defaultMascotSeedVersion")
+            for preset in Self.presets {
+                if let config = await Self.fetchRemoteConfig(slug: preset.slug) {
+                    await MainActor.run {
+                        self.addFromPreset(config: config, slug: preset.slug)
+                    }
+                } else {
+                    await MainActor.run {
+                        guard let config = Self.loadBundledConfig(named: preset.filename) else { return }
+                        self.addFromPreset(config: config, slug: preset.slug)
+                    }
                 }
-                return
             }
-            // Offline fallback: load from bundle
             await MainActor.run {
-                guard let config = Self.loadBundledConfig(named: firstPreset.filename) else { return }
-                self.addFromPreset(config: config, slug: firstPreset.slug)
                 UserDefaults.standard.set(Self.seedVersion, forKey: "defaultMascotSeedVersion")
             }
         }
@@ -77,15 +77,21 @@ final class MascotStore {
     }
 
     /// Re-apply bundled configs when the seed version is bumped (e.g. condition fixes).
+    /// Also adds any missing presets for existing users.
     private func migrateSeedIfNeeded() {
         let current = UserDefaults.standard.integer(forKey: "defaultMascotSeedVersion")
         guard current < Self.seedVersion else { return }
 
-        // Update any existing preset mascots with fresh bundled configs
+        let addedSlugs = Set(mascots.compactMap(\.templateSlug))
+
         for preset in Self.presets {
             guard let config = Self.loadBundledConfig(named: preset.filename) else { continue }
             if let idx = mascots.firstIndex(where: { $0.templateSlug == preset.slug }) {
+                // Update existing preset with fresh config
                 mascots[idx].config = config
+            } else if !addedSlugs.contains(preset.slug) {
+                // Add missing preset
+                addFromPreset(config: config, slug: preset.slug)
             }
         }
         persist()
