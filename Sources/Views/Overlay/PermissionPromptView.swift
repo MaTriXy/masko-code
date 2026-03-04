@@ -22,51 +22,150 @@ private enum OverlayStyle {
     static let tailHeight: CGFloat = 8
 }
 
+// MARK: - Tail Side Environment
+
+/// Which edge of the speech bubble the tail protrudes from
+enum TailSide {
+    case bottom, top, left, right
+
+    var paddingEdge: Edge.Set {
+        switch self {
+        case .bottom: return .bottom
+        case .top: return .top
+        case .left: return .leading
+        case .right: return .trailing
+        }
+    }
+}
+
+private struct TailSideKey: EnvironmentKey {
+    static let defaultValue: TailSide = .bottom
+}
+
+private struct TailPercentKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0.80
+}
+
+extension EnvironmentValues {
+    var speechBubbleTailSide: TailSide {
+        get { self[TailSideKey.self] }
+        set { self[TailSideKey.self] = newValue }
+    }
+    /// Position along the tail's edge (0.0–1.0). For top/bottom = horizontal, for left/right = vertical.
+    var speechBubbleTailPercent: CGFloat {
+        get { self[TailPercentKey.self] }
+        set { self[TailPercentKey.self] = newValue }
+    }
+}
+
 // MARK: - Speech Bubble Shape
 
-/// Card with 14px corners and a triangular tail at bottom-center-right pointing toward mascot
+/// Card with 14px corners and a triangular tail on any of the 4 edges.
+/// `tailSide` controls which edge; `tailPercent` controls position along that edge.
 private struct SpeechBubbleShape: Shape {
+    var tailSide: TailSide = .bottom
+    var tailPercent: CGFloat = 0.80
+
+    private let r: CGFloat = 14
+    private let tailH: CGFloat = OverlayStyle.tailHeight
+    private let tailW: CGFloat = 14
+
     func path(in rect: CGRect) -> Path {
-        let r: CGFloat = 14  // uniform corner radius
+        switch tailSide {
+        case .bottom: return bottomPath(in: rect)
+        case .top:    return topPath(in: rect)
+        case .left:   return leftPath(in: rect)
+        case .right:  return rightPath(in: rect)
+        }
+    }
 
-        let tailH: CGFloat = OverlayStyle.tailHeight
-        let tailW: CGFloat = 14
-        // Tail sits far right — points toward mascot below-right
-        let tailCenter = rect.width * 0.80
+    // Clamp tail center along an axis so it stays inside corner radii
+    private func clamp(_ value: CGFloat, length: CGFloat) -> CGFloat {
+        let minV = r + tailW / 2
+        let maxV = length - r - tailW / 2
+        return max(minV, min(value, maxV))
+    }
+
+    private func bottomPath(in rect: CGRect) -> Path {
         let cardBottom = rect.height - tailH
+        let tc = clamp(rect.width * tailPercent, length: rect.width)
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: rect.width - r, y: 0))
+        p.addArc(center: CGPoint(x: rect.width - r, y: r), radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        p.addLine(to: CGPoint(x: rect.width, y: cardBottom - r))
+        p.addArc(center: CGPoint(x: rect.width - r, y: cardBottom - r), radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: tc + tailW / 2, y: cardBottom))
+        p.addLine(to: CGPoint(x: tc, y: rect.height))
+        p.addLine(to: CGPoint(x: tc - tailW / 2, y: cardBottom))
+        p.addLine(to: CGPoint(x: r, y: cardBottom))
+        p.addArc(center: CGPoint(x: r, y: cardBottom - r), radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        p.addLine(to: CGPoint(x: 0, y: r))
+        p.addArc(center: CGPoint(x: r, y: r), radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
+    }
 
-        var path = Path()
+    private func topPath(in rect: CGRect) -> Path {
+        let cardTop = tailH
+        let tc = clamp(rect.width * tailPercent, length: rect.width)
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: cardTop))
+        p.addLine(to: CGPoint(x: tc - tailW / 2, y: cardTop))
+        p.addLine(to: CGPoint(x: tc, y: 0))
+        p.addLine(to: CGPoint(x: tc + tailW / 2, y: cardTop))
+        p.addLine(to: CGPoint(x: rect.width - r, y: cardTop))
+        p.addArc(center: CGPoint(x: rect.width - r, y: cardTop + r), radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        p.addLine(to: CGPoint(x: rect.width, y: rect.height - r))
+        p.addArc(center: CGPoint(x: rect.width - r, y: rect.height - r), radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: r, y: rect.height))
+        p.addArc(center: CGPoint(x: r, y: rect.height - r), radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        p.addLine(to: CGPoint(x: 0, y: cardTop + r))
+        p.addArc(center: CGPoint(x: r, y: cardTop + r), radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
+    }
 
-        // Start at top edge after top-left corner
-        path.move(to: CGPoint(x: r, y: 0))
+    private func leftPath(in rect: CGRect) -> Path {
+        let cardLeft = tailH
+        let tc = clamp(rect.height * tailPercent, length: rect.height)
+        var p = Path()
+        p.move(to: CGPoint(x: cardLeft + r, y: 0))
+        p.addLine(to: CGPoint(x: rect.width - r, y: 0))
+        p.addArc(center: CGPoint(x: rect.width - r, y: r), radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        p.addLine(to: CGPoint(x: rect.width, y: rect.height - r))
+        p.addArc(center: CGPoint(x: rect.width - r, y: rect.height - r), radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: cardLeft + r, y: rect.height))
+        p.addArc(center: CGPoint(x: cardLeft + r, y: rect.height - r), radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        // Left edge with tail (going down to up)
+        p.addLine(to: CGPoint(x: cardLeft, y: tc + tailW / 2))
+        p.addLine(to: CGPoint(x: 0, y: tc))
+        p.addLine(to: CGPoint(x: cardLeft, y: tc - tailW / 2))
+        p.addLine(to: CGPoint(x: cardLeft, y: r))
+        p.addArc(center: CGPoint(x: cardLeft + r, y: r), radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
+    }
 
-        // Top edge → top-right corner
-        path.addLine(to: CGPoint(x: rect.width - r, y: 0))
-        path.addArc(center: CGPoint(x: rect.width - r, y: r),
-                     radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
-
-        // Right edge → bottom-right corner
-        path.addLine(to: CGPoint(x: rect.width, y: cardBottom - r))
-        path.addArc(center: CGPoint(x: rect.width - r, y: cardBottom - r),
-                     radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
-
-        // Bottom edge → tail (right side of tail first)
-        path.addLine(to: CGPoint(x: tailCenter + tailW / 2, y: cardBottom))
-        path.addLine(to: CGPoint(x: tailCenter, y: rect.height))        // tail tip
-        path.addLine(to: CGPoint(x: tailCenter - tailW / 2, y: cardBottom))
-
-        // Continue bottom edge → bottom-left corner
-        path.addLine(to: CGPoint(x: r, y: cardBottom))
-        path.addArc(center: CGPoint(x: r, y: cardBottom - r),
-                     radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
-
-        // Left edge → top-left corner
-        path.addLine(to: CGPoint(x: 0, y: r))
-        path.addArc(center: CGPoint(x: r, y: r),
-                     radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
-
-        path.closeSubpath()
-        return path
+    private func rightPath(in rect: CGRect) -> Path {
+        let cardRight = rect.width - tailH
+        let tc = clamp(rect.height * tailPercent, length: rect.height)
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: cardRight - r, y: 0))
+        p.addArc(center: CGPoint(x: cardRight - r, y: r), radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        // Right edge with tail (going top to bottom)
+        p.addLine(to: CGPoint(x: cardRight, y: tc - tailW / 2))
+        p.addLine(to: CGPoint(x: rect.width, y: tc))
+        p.addLine(to: CGPoint(x: cardRight, y: tc + tailW / 2))
+        p.addLine(to: CGPoint(x: cardRight, y: rect.height - r))
+        p.addArc(center: CGPoint(x: cardRight - r, y: rect.height - r), radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: r, y: rect.height))
+        p.addArc(center: CGPoint(x: r, y: rect.height - r), radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        p.addLine(to: CGPoint(x: 0, y: r))
+        p.addArc(center: CGPoint(x: r, y: r), radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -93,6 +192,8 @@ struct AskUserQuestionView: View {
     let onDeny: () -> Void
     let onLater: () -> Void
 
+    @Environment(\.speechBubbleTailSide) private var tailSide
+    @Environment(\.speechBubbleTailPercent) private var tailPercent
     @State private var selections: [String: String] = [:]
     @State private var multiSelections: [String: Set<String>] = [:]
     @State private var customInputs: [String: String] = [:]
@@ -191,9 +292,9 @@ struct AskUserQuestionView: View {
             }
         }
         .padding(8)
-        .padding(.bottom, OverlayStyle.tailHeight)
+        .padding(tailSide.paddingEdge, OverlayStyle.tailHeight)
         .background(OverlayStyle.cardBg)
-        .clipShape(SpeechBubbleShape())
+        .clipShape(SpeechBubbleShape(tailSide: tailSide, tailPercent: tailPercent))
         .shadow(color: OverlayStyle.cardShadow, radius: 3, x: 0, y: 2)
     }
 
@@ -330,6 +431,8 @@ struct ExitPlanModeView: View {
     let onAllowWithPermissions: (([PermissionSuggestion]) -> Void)?
     let onLater: () -> Void
 
+    @Environment(\.speechBubbleTailSide) private var tailSide
+    @Environment(\.speechBubbleTailPercent) private var tailPercent
     @State private var selectedOption = 1
     @State private var feedbackText = ""
     @State private var isExpanded = false
@@ -503,9 +606,9 @@ struct ExitPlanModeView: View {
             }
         }
         .padding(8)
-        .padding(.bottom, OverlayStyle.tailHeight)
+        .padding(tailSide.paddingEdge, OverlayStyle.tailHeight)
         .background(OverlayStyle.cardBg)
-        .clipShape(SpeechBubbleShape())
+        .clipShape(SpeechBubbleShape(tailSide: tailSide, tailPercent: tailPercent))
         .shadow(color: OverlayStyle.cardShadow, radius: 3, x: 0, y: 2)
         .onAppear {
             planContent = permission.planFileContent
@@ -532,6 +635,8 @@ struct PermissionPromptView: View {
         self.onLater = onLater
     }
 
+    @Environment(\.speechBubbleTailSide) private var tailSide
+    @Environment(\.speechBubbleTailPercent) private var tailPercent
     @State private var isExpanded = false
 
     var body: some View {
@@ -672,9 +777,9 @@ struct PermissionPromptView: View {
             }
         }
         .padding(8)
-        .padding(.bottom, OverlayStyle.tailHeight)
+        .padding(tailSide.paddingEdge, OverlayStyle.tailHeight)
         .background(OverlayStyle.cardBg)
-        .clipShape(SpeechBubbleShape())
+        .clipShape(SpeechBubbleShape(tailSide: tailSide, tailPercent: tailPercent))
         .shadow(color: OverlayStyle.cardShadow, radius: 3, x: 0, y: 2)
     }
 }

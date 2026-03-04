@@ -3,6 +3,8 @@ import AppKit
 /// A transparent, always-on-top, non-focus-stealing panel for the mascot overlay.
 /// Stays visible across fullscreen apps, Mission Control, Space switches, and Cmd+Tab.
 final class OverlayPanel: NSPanel {
+    var onRightClick: ((NSPoint) -> Void)?
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -30,6 +32,15 @@ final class OverlayPanel: NSPanel {
             .ignoresCycle,               // skip Cmd+` window cycling
             .fullScreenDisallowsTiling,  // prevent macOS 13+ tiling
         ]
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .rightMouseDown, let onRightClick {
+            let screenPoint = convertPoint(toScreen: event.locationInWindow)
+            onRightClick(screenPoint)
+            return
+        }
+        super.sendEvent(event)
     }
 
     override var canBecomeKey: Bool { true }

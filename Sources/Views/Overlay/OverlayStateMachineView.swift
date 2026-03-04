@@ -10,44 +10,43 @@ struct OverlayStateMachineView: View {
     let stateMachine: OverlayStateMachine
     let onClose: () -> Void
     let onResize: (OverlaySize) -> Void
+    let onDragResize: (Int) -> Void
+    let onDragResizeEnd: (Int) -> Void
+    let onSnooze: (Int) -> Void
 
-    @AppStorage("overlay_show_debug") private var showDebug = false
-    @AppStorage("overlay_show_stats") private var showStats = true
+    @AppStorage("overlay_size") private var currentSizePixels: Int = OverlaySize.medium.rawValue
+    @AppStorage("overlay_resize_mode") private var resizeMode = false
 
     var body: some View {
-        StateMachineVideoPlayer(
-            url: stateMachine.currentVideoURL,
-            isLoop: stateMachine.isLoopVideo,
-            stateMachine: stateMachine
-        )
-            .contextMenu {
-                Menu("Size") {
-                    Button("Small (100)") { onResize(.small) }
-                    Button("Medium (150)") { onResize(.medium) }
-                    Button("Large (200)") { onResize(.large) }
-                    Button("Extra Large (300)") { onResize(.extraLarge) }
-                }
-                Divider()
-                Button(showStats ? "Hide Stats" : "Show Stats") {
-                    showStats.toggle()
-                }
-                Button(showDebug ? "Hide Debug" : "Show Debug") {
-                    showDebug.toggle()
-                }
-                Divider()
-                Button("Close Mascot") { onClose() }
-            }
+        ZStack(alignment: .bottomTrailing) {
+            StateMachineVideoPlayer(
+                url: stateMachine.currentVideoURL,
+                isLoop: stateMachine.isLoopVideo,
+                stateMachine: stateMachine
+            )
             .onTapGesture {
                 stateMachine.handleClick()
             }
+
+            if resizeMode {
+                ResizeHandle(
+                    currentSize: currentSizePixels,
+                    onDrag: onDragResize,
+                    onDragEnd: { size in
+                        onDragResizeEnd(size)
+                        resizeMode = false
+                    }
+                )
+                .frame(width: 32, height: 32)
+            }
+        }
     }
 }
 
-// MARK: - HUD Overlay View (separate panel above mascot)
+// MARK: - Stats HUD View (fixed panel directly above mascot)
 
-/// Stats pill, debug HUD, and permission prompts.
-/// Lives in a child NSPanel that floats above the mascot.
-struct HUDOverlayView: View {
+/// Stats pill and debug HUD. Lives in its own panel that never repositions.
+struct StatsHUDView: View {
     let stateMachine: OverlayStateMachine
 
     @AppStorage("overlay_show_debug") private var showDebug = false
@@ -55,22 +54,52 @@ struct HUDOverlayView: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Spacer(minLength: 0)
-
-            // Permission prompts
-            PermissionStackView()
-
-            // Debug HUD
             if showDebug {
                 DebugHUD(stateMachine: stateMachine)
             }
 
-            // Stats pill
             if showStats {
                 StatsOverlayView()
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .frame(maxWidth: .infinity, alignment: .bottom)
+    }
+}
+
+// MARK: - Permission HUD View (adaptive panel, repositions for screen edges)
+
+/// Permission prompts in a speech bubble. Lives in its own panel that adapts position.
+@Observable
+final class PermissionHUDConfig {
+    var tailSide: TailSide = .bottom
+    var tailPercent: CGFloat = 0.80
+    var onContentSizeChange: ((CGSize) -> Void)?
+
+    var contentSize: CGSize = CGSize(width: 280, height: 200) {
+        didSet {
+            guard abs(contentSize.width - oldValue.width) > 2
+               || abs(contentSize.height - oldValue.height) > 2 else { return }
+            onContentSizeChange?(contentSize)
+        }
+    }
+}
+
+struct PermissionHUDView: View {
+    let config: PermissionHUDConfig
+
+    var body: some View {
+        PermissionStackView()
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 280, maxHeight: .infinity, alignment: .bottom)
+            .background(GeometryReader { geo in
+                Color.clear
+                    .onAppear { config.contentSize = geo.size }
+                    .onChange(of: geo.size) { _, newSize in
+                        config.contentSize = newSize
+                    }
+            })
+            .environment(\.speechBubbleTailSide, config.tailSide)
+            .environment(\.speechBubbleTailPercent, config.tailPercent)
     }
 }
 
