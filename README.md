@@ -27,13 +27,16 @@
 
 | | Feature | Description |
 |---|---|---|
-| 🎭 | **Animated overlay** | A mascot that floats above all windows and reacts to Claude Code state — idle, working, thinking, needs attention |
-| 🔐 | **Permission handling** | Approve or deny tool use requests from a speech bubble. No window switching |
+| 🎭 | **Animated overlay** | A mascot that floats above all windows and reacts to Claude Code state — click or hover to interact |
+| 🔐 | **Permission handling** | Approve, deny, or defer tool use requests from a speech bubble — select with `⌘1-9`, permissions stack in a queue |
 | 💬 | **Question answering** | Answer Claude's questions directly from the overlay |
 | 📋 | **Plan review** | Review and approve plans without opening your terminal |
 | 📊 | **Session tracking** | Monitor active sessions, subagents, and status at a glance |
 | 🔔 | **Notification dashboard** | Priority levels, resolution tracking, color-coded activity feed |
-| 🖥️ | **Find the right terminal** | Jump to the correct terminal tab instantly |
+| 🖥️ | **Find the right terminal** | Jump to the correct terminal tab — supports VS Code, Cursor, Zed, Nova, JetBrains |
+| 🔀 | **Session switcher** | Double-tap `⌘` to switch between Claude Code sessions |
+| 😴 | **Snooze** | Right-click to hide the mascot for 15 min, 1 hour, or indefinitely |
+| ↔️ | **Resizable** | Drag to resize or pick a preset (S / M / L / XL) from the context menu |
 | 🔄 | **Auto-updates** | Built-in Sparkle updates — always on the latest version |
 
 ## How It Works
@@ -56,13 +59,39 @@
 3. **Pick a mascot** — Choose the default Masko or bring your own from [masko.ai](https://masko.ai).
 4. **Start coding** — Open a terminal, run Claude Code. Your mascot springs to life.
 
+## Keyboard Shortcuts
+
+All shortcuts work globally — no need to focus the app.
+
+| Shortcut | Action |
+|---|---|
+| `⌘M` | Toggle dashboard (customizable in Settings) |
+| `⌘1-9` | Select Nth pending permission |
+| `⌘Enter` | Approve selected permission |
+| `⌘Esc` | Deny / dismiss permission |
+| `⌘L` | Collapse / defer topmost permission |
+| `Double-tap ⌘` | Open session switcher (2+ sessions) |
+| `↑ / ↓` | Navigate session switcher |
+| `Tab / Shift+Tab` | Cycle sessions |
+| `Enter` | Confirm session selection |
+| `Esc` | Close session switcher |
+
+The focus toggle shortcut can be rebound to any key combination in Settings.
+
+Right-click the mascot to open the **context menu** — snooze, resize, or close the overlay.
+
 ## Custom Mascots
 
 The default Masko fox is included. Want your own character? Create one on [masko.ai](https://masko.ai) with AI-generated animations for every state (idle, working, attention). Export and load it into the desktop app in one click.
 
-## VS Code Extension
+## IDE Extensions
 
-The `vscode-extension/` directory includes a lightweight VS Code extension that adds click-to-focus: click the mascot overlay and it jumps to the active Claude Code terminal tab.
+Masko can focus the exact terminal tab running Claude Code. Supported editors:
+
+- **VS Code** / **Cursor** — extension in `vscode-extension/`, installed automatically during onboarding
+- **Zed**, **Nova**, **JetBrains IDEs** — supported via AppleScript integration
+
+Click a session in the dashboard or click the mascot overlay to jump to the right terminal tab.
 
 ## Requirements
 
@@ -95,7 +124,7 @@ Sources/
 ├── Utilities/       # Helpers
 └── Resources/       # Assets, images, app icon
 scripts/             # DMG packaging scripts
-vscode-extension/    # VS Code click-to-focus extension
+vscode-extension/    # IDE click-to-focus extension
 ```
 
 ## Contributing
