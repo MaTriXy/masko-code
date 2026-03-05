@@ -98,6 +98,10 @@ scripts/             # DMG packaging scripts
 vscode-extension/    # VS Code click-to-focus extension
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
+
 ## License
 
-Copyright 2026 Masko. All rights reserved.
+[MIT License](LICENSE) — Copyright (c) 2026 Masko.
