@@ -89,6 +89,19 @@ struct ClaudeEvent: Identifiable, Codable {
         }
     }
 
+    var isLikelyCodexQuestionPrompt: Bool {
+        guard assistantClientKind != .claude else { return false }
+        return Self.looksLikeQuestionPrompt(message ?? lastAssistantMessage)
+    }
+
+    static func looksLikeQuestionPrompt(_ text: String?) -> Bool {
+        guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+        return trimmed.hasSuffix("?") || trimmed.contains("[question-issued]")
+    }
+
     enum CodingKeys: String, CodingKey {
         case hookEventName = "hook_event_name"
         case sessionId = "session_id"

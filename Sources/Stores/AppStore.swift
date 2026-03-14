@@ -64,6 +64,27 @@ final class AppStore {
         )
     }
 
+    static func shouldDismissPendingPermissions(for event: ClaudeEvent) -> Bool {
+        switch event.eventType {
+        case .userPromptSubmit:
+            return true
+        case .stop:
+            return !event.isLikelyCodexQuestionPrompt
+        default:
+            return false
+        }
+    }
+
+    static func shouldShowSessionFinishedToast(for event: ClaudeEvent, hasPendingPermissions: Bool) -> Bool {
+        guard event.eventType == .stop,
+              event.reason != "interrupted",
+              !hasPendingPermissions,
+              !event.isLikelyCodexQuestionPrompt else {
+            return false
+        }
+        return true
+    }
+
     var hasUnreadNotifications: Bool { notificationStore.unreadCount > 0 }
     var assistantEventIngestionStatus: AssistantEventIngestionStatus {
         Self.assistantEventIngestionStatus(
@@ -329,7 +350,7 @@ final class AppStore {
                 )
             }
 
-            if [.stop, .userPromptSubmit].contains(eventType),
+            if Self.shouldDismissPendingPermissions(for: event),
                pendingPermissionStore.pending.contains(where: {
                    $0.event.sessionId == sid && $0.event.agentId == event.agentId
                }) {
@@ -343,9 +364,10 @@ final class AppStore {
         }
 
         // Show "task completed" toast when assistant finishes (skip interrupts)
-        if event.eventType == .stop,
-           event.reason != "interrupted",
-           !pendingPermissionStore.pending.contains(where: { $0.event.sessionId == event.sessionId }) {
+        if Self.shouldShowSessionFinishedToast(
+            for: event,
+            hasPendingPermissions: pendingPermissionStore.pending.contains(where: { $0.event.sessionId == event.sessionId })
+        ) {
             sessionFinishedStore.show(
                 sessionId: event.sessionId ?? "",
                 projectName: event.projectName ?? "Project"

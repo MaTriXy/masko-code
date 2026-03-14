@@ -2,6 +2,58 @@ import XCTest
 @testable import masko_code
 
 final class AppStoreAssistantEventStatusTests: XCTestCase {
+    func testCodexQuestionStopDoesNotDismissPendingPermissions() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.stop.rawValue,
+            sessionId: "codex-question-stop",
+            cwd: "/tmp/project",
+            source: "codex-cli",
+            reason: "completed",
+            lastAssistantMessage: "Which remote should I use for the dry-run push?"
+        )
+
+        XCTAssertFalse(AppStore.shouldDismissPendingPermissions(for: event))
+    }
+
+    func testClaudeStopStillDismissesPendingPermissions() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.stop.rawValue,
+            sessionId: "claude-stop",
+            cwd: "/tmp/project",
+            source: "claude",
+            reason: "completed",
+            lastAssistantMessage: "Do you want me to continue?"
+        )
+
+        XCTAssertTrue(AppStore.shouldDismissPendingPermissions(for: event))
+    }
+
+    func testCodexQuestionStopDoesNotShowSessionFinishedToast() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.stop.rawValue,
+            sessionId: "codex-question-stop",
+            cwd: "/tmp/project",
+            source: "codex-cli",
+            reason: "completed",
+            lastAssistantMessage: "Which remote should I use for the dry-run push?"
+        )
+
+        XCTAssertFalse(AppStore.shouldShowSessionFinishedToast(for: event, hasPendingPermissions: false))
+    }
+
+    func testClaudeStopStillShowsSessionFinishedToastWhenNoPendingPermissions() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.stop.rawValue,
+            sessionId: "claude-stop",
+            cwd: "/tmp/project",
+            source: "claude",
+            reason: "completed",
+            lastAssistantMessage: "Do you want me to continue?"
+        )
+
+        XCTAssertTrue(AppStore.shouldShowSessionFinishedToast(for: event, hasPendingPermissions: false))
+    }
+
     func testStatusWhenBothClaudeAndCodexIngestionAreActive() {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: true,

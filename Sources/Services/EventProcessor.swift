@@ -89,6 +89,9 @@ final class EventProcessor {
             )
 
         case .stop:
+            if event.isLikelyCodexQuestionPrompt {
+                return nil
+            }
             return AppNotification(
                 title: "Task Completed",
                 body: truncate(event.lastAssistantMessage, maxLength: 100)
@@ -108,6 +111,10 @@ final class EventProcessor {
             )
 
         case .taskCompleted:
+            if event.assistantClientKind != .claude,
+               ClaudeEvent.looksLikeQuestionPrompt(event.taskSubject) {
+                return nil
+            }
             return AppNotification(
                 title: "Task Completed",
                 body: event.taskSubject ?? "A task was completed",

@@ -92,6 +92,26 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(stopResult.events.last?.taskSubject, "Done")
     }
 
+    func testTaskCompleteQuestionOnlyEmitsStop() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = """
+        {"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn_question","last_agent_message":"Which remote should I use for the dry-run push?"}}
+        """
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 1)
+        XCTAssertEqual(result.events.first?.hookEventName, HookEventType.stop.rawValue)
+        XCTAssertEqual(result.events.first?.lastAssistantMessage, "Which remote should I use for the dry-run push?")
+    }
+
     func testEventMsgRequestUserInputMapsToQuestionPermissionRequest() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let context = CodexSessionContext(
@@ -295,6 +315,57 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(reasoning.events.first?.hookEventName, HookEventType.notification.rawValue)
         XCTAssertEqual(reasoning.events.first?.notificationType, "codex_agent_reasoning")
         XCTAssertEqual(reasoning.events.first?.message, "Inspecting project structure")
+    }
+
+    func testCommentaryAgentQuestionSynthesizesAskUserQuestionPermissionRequest() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Which remote should I use for the dry-run push?"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 2)
+
+        let notification = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(notification.hookEventName, HookEventType.notification.rawValue)
+        XCTAssertEqual(notification.notificationType, "codex_agent_message")
+        XCTAssertEqual(notification.message, "Which remote should I use for the dry-run push?")
+
+        let permission = try XCTUnwrap(result.events.last)
+        XCTAssertEqual(permission.hookEventName, HookEventType.permissionRequest.rawValue)
+        XCTAssertEqual(permission.toolName, "AskUserQuestion")
+        XCTAssertEqual(permission.message, "Which remote should I use for the dry-run push?")
+        let questions = try XCTUnwrap(permission.toolInput?["questions"]?.value as? [[String: Any]])
+        XCTAssertEqual(
+            questions.first?["question"] as? String,
+            "Which remote should I use for the dry-run push?"
+        )
+    }
+
+    func testFinalAnswerAgentMessageWithEmptyTextIsIgnored() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"   "}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertTrue(result.events.isEmpty)
     }
 
     func testTokenCountEventMessageMapsToNotification() throws {

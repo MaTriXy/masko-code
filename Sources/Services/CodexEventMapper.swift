@@ -136,7 +136,7 @@ enum CodexEventMapper {
                 ]
             case "task_complete":
                 let lastMessage = payload["last_agent_message"] as? String
-                result.events = [
+                var events = [
                     ClaudeEvent(
                         hookEventName: HookEventType.stop.rawValue,
                         sessionId: sessionId,
@@ -145,15 +145,20 @@ enum CodexEventMapper {
                         reason: "completed",
                         lastAssistantMessage: lastMessage
                     ),
-                    ClaudeEvent(
-                        hookEventName: HookEventType.taskCompleted.rawValue,
-                        sessionId: sessionId,
-                        cwd: workingContext.cwd,
-                        source: source,
-                        taskId: payload["turn_id"] as? String,
-                        taskSubject: codexTaskSubject(from: lastMessage)
-                    ),
                 ]
+                if !ClaudeEvent.looksLikeQuestionPrompt(lastMessage) {
+                    events.append(
+                        ClaudeEvent(
+                            hookEventName: HookEventType.taskCompleted.rawValue,
+                            sessionId: sessionId,
+                            cwd: workingContext.cwd,
+                            source: source,
+                            taskId: payload["turn_id"] as? String,
+                            taskSubject: codexTaskSubject(from: lastMessage)
+                        )
+                    )
+                }
+                result.events = events
             case "turn_aborted":
                 result.events = [
                     ClaudeEvent(
@@ -181,34 +186,51 @@ enum CodexEventMapper {
                     ),
                 ]
             case "agent_message":
-                result.events = [
+                guard let message = nonEmptyString(payload["message"]) else { return result }
+                var events = [
                     ClaudeEvent(
                         hookEventName: HookEventType.notification.rawValue,
                         sessionId: sessionId,
                         cwd: workingContext.cwd,
-                        message: payload["message"] as? String,
+                        message: message,
                         notificationType: "codex_agent_message",
                         source: source
                     ),
                 ]
+                if shouldSynthesizeQuestionPermission(message: message, phase: payload["phase"] as? String) {
+                    events.append(
+                        ClaudeEvent(
+                            hookEventName: HookEventType.permissionRequest.rawValue,
+                            sessionId: sessionId,
+                            cwd: workingContext.cwd,
+                            toolName: "AskUserQuestion",
+                            toolInput: codableMap(codexQuestionToolInput(message: message)),
+                            message: message,
+                            source: source
+                        )
+                    )
+                }
+                result.events = events
             case "user_message":
+                guard let message = nonEmptyString(payload["message"]) else { return result }
                 result.events = [
                     ClaudeEvent(
                         hookEventName: HookEventType.notification.rawValue,
                         sessionId: sessionId,
                         cwd: workingContext.cwd,
-                        message: payload["message"] as? String,
+                        message: message,
                         notificationType: "codex_user_message",
                         source: source
                     ),
                 ]
             case "agent_reasoning":
+                guard let message = nonEmptyString(payload["text"]) else { return result }
                 result.events = [
                     ClaudeEvent(
                         hookEventName: HookEventType.notification.rawValue,
                         sessionId: sessionId,
                         cwd: workingContext.cwd,
-                        message: payload["text"] as? String,
+                        message: message,
                         notificationType: "codex_agent_reasoning",
                         source: source
                     ),
@@ -772,9 +794,26 @@ enum CodexEventMapper {
         return rawValue.lowercased() == "require_escalated"
     }
 
+    private static func shouldSynthesizeQuestionPermission(message: String, phase: String?) -> Bool {
+        guard let phase = phase?.lowercased(), phase == "commentary" else { return false }
+        return ClaudeEvent.looksLikeQuestionPrompt(message)
+    }
+
     private static func isRequestUserInput(toolName: String, arguments: [String: Any]) -> Bool {
         guard toolName == "request_user_input" else { return false }
         return arguments["questions"] != nil
+    }
+
+    private static func codexQuestionToolInput(message: String) -> [String: Any] {
+        [
+            "questions": [
+                [
+                    "id": "response",
+                    "question": message,
+                    "options": [],
+                ],
+            ],
+        ]
     }
 
     private static func codexPermissionMessage(toolName: String, arguments: [String: Any]) -> String {
@@ -944,5 +983,11 @@ enum CodexEventMapper {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return trimmed.components(separatedBy: .newlines).first
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
