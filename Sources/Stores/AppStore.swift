@@ -271,6 +271,15 @@ final class AppStore {
     private func handleIncomingEvent(_ event: ClaudeEvent) async {
         await eventProcessor.process(event)
 
+        // Codex permission requests are log-derived (no held hook connection).
+        // Queue them as local pending permissions so mascot approval UI can handle them.
+        if event.eventType == .permissionRequest,
+           event.assistantClientKind != .claude {
+            pendingPermissionStore.addLocal(event: event) { [weak self] decision in
+                self?.handleLocalCodexPermissionDecision(event: event, decision: decision) ?? false
+            }
+        }
+
         // If a subsequent event arrives for a session with pending permissions,
         // the user may have resolved a permission from the terminal — dismiss it.
         // For postToolUse/postToolUseFailure: only dismiss the SPECIFIC tool use
@@ -321,6 +330,16 @@ final class AppStore {
         }
 
         onEventForOverlay?(event)
+    }
+
+    private func handleLocalCodexPermissionDecision(event: ClaudeEvent, decision: PermissionDecision) -> Bool {
+        // Current Codex integration is one-way (session logs), so we record the decision
+        // locally to drive overlay state until a bidirectional approval channel is available.
+        print(
+            "[masko-desktop] Codex local permission \(decision.rawValue): " +
+            "\(event.toolName ?? "unknown") session=\(event.sessionId ?? "unknown")"
+        )
+        return true
     }
 
     /// Recompute which overlay card has priority and sync to the hotkey shared state.

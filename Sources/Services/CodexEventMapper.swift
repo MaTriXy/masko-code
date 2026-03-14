@@ -201,17 +201,38 @@ enum CodexEventMapper {
         switch payloadType {
         case "function_call", "custom_tool_call":
             let arguments = parseJSONObject(payload["arguments"]) ?? [:]
-            return [
+            let toolName = payload["name"] as? String ?? "tool"
+            let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String
+            var events: [ClaudeEvent] = [
                 ClaudeEvent(
                     hookEventName: HookEventType.preToolUse.rawValue,
                     sessionId: sessionId,
                     cwd: cwd,
-                    toolName: payload["name"] as? String ?? "tool",
+                    toolName: toolName,
                     toolInput: codableMap(arguments),
-                    toolUseId: payload["call_id"] as? String ?? payload["id"] as? String,
+                    toolUseId: toolUseId,
                     source: source
                 ),
             ]
+
+            // Codex does not emit Claude-style PermissionRequest hooks.
+            // When a tool call explicitly asks for escalated sandbox permissions,
+            // synthesize a permission request so the existing mascot approval UX can react.
+            if requiresEscalatedPermission(arguments) {
+                events.append(
+                    ClaudeEvent(
+                        hookEventName: HookEventType.permissionRequest.rawValue,
+                        sessionId: sessionId,
+                        cwd: cwd,
+                        toolName: toolName,
+                        toolInput: codableMap(arguments),
+                        toolUseId: toolUseId,
+                        message: codexPermissionMessage(toolName: toolName, arguments: arguments),
+                        source: source
+                    )
+                )
+            }
+            return events
 
         case "function_call_output", "custom_tool_call_output":
             let output = parseJSONObject(payload["output"])
@@ -244,17 +265,34 @@ enum CodexEventMapper {
         source: String
     ) -> [ClaudeEvent] {
         let arguments = parseJSONObject(payload["arguments"]) ?? [:]
-        return [
+        let toolName = payload["name"] as? String ?? "tool"
+        let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String
+        var events: [ClaudeEvent] = [
             ClaudeEvent(
                 hookEventName: HookEventType.preToolUse.rawValue,
                 sessionId: sessionId,
                 cwd: cwd,
-                toolName: payload["name"] as? String ?? "tool",
+                toolName: toolName,
                 toolInput: codableMap(arguments),
-                toolUseId: payload["call_id"] as? String ?? payload["id"] as? String,
+                toolUseId: toolUseId,
                 source: source
             ),
         ]
+        if requiresEscalatedPermission(arguments) {
+            events.append(
+                ClaudeEvent(
+                    hookEventName: HookEventType.permissionRequest.rawValue,
+                    sessionId: sessionId,
+                    cwd: cwd,
+                    toolName: toolName,
+                    toolInput: codableMap(arguments),
+                    toolUseId: toolUseId,
+                    message: codexPermissionMessage(toolName: toolName, arguments: arguments),
+                    source: source
+                )
+            )
+        }
+        return events
     }
 
     private static func mapLegacyToolOutput(
@@ -297,5 +335,20 @@ enum CodexEventMapper {
         guard let existing else { return update }
         guard existing.sessionId == update.sessionId else { return update }
         return existing.merged(with: update)
+    }
+
+    private static func requiresEscalatedPermission(_ arguments: [String: Any]) -> Bool {
+        guard let rawValue = arguments["sandbox_permissions"] as? String else { return false }
+        return rawValue.lowercased() == "require_escalated"
+    }
+
+    private static func codexPermissionMessage(toolName: String, arguments: [String: Any]) -> String {
+        if let justification = arguments["justification"] as? String, !justification.isEmpty {
+            return justification
+        }
+        if let command = arguments["cmd"] as? String, !command.isEmpty {
+            return "Codex needs approval to run: \(command)"
+        }
+        return "Codex needs approval to run \(toolName)"
     }
 }

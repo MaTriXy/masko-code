@@ -909,6 +909,13 @@ struct PermissionPromptView: View {
                 }
             }
 
+            if let message = permission.event.message, !message.isEmpty {
+                Text(message)
+                    .font(Constants.body(size: 10, weight: .medium))
+                    .foregroundStyle(OverlayStyle.textMuted)
+                    .lineLimit(2)
+            }
+
             // Code preview
             if isExpanded {
                 ScrollView(.vertical, showsIndicators: true) {
@@ -1274,4 +1281,3 @@ struct DialogScalePreview: View {
         .shadow(color: OverlayStyle.cardShadow, radius: 3, x: 0, y: 2)
     }
 }
-

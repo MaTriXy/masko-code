@@ -129,6 +129,34 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(postTool.toolResponse?["exit_code"]?.intValue, 0)
     }
 
+    func testFunctionCallWithEscalatedSandboxEmitsPermissionRequest() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_perm_1","arguments":"{\"cmd\":\"git push\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Need network access to push branch\"}"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 2)
+        let preTool = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(preTool.hookEventName, HookEventType.preToolUse.rawValue)
+        XCTAssertEqual(preTool.toolUseId, "call_perm_1")
+
+        let permission = try XCTUnwrap(result.events.last)
+        XCTAssertEqual(permission.hookEventName, HookEventType.permissionRequest.rawValue)
+        XCTAssertEqual(permission.toolUseId, "call_perm_1")
+        XCTAssertEqual(permission.toolName, "exec_command")
+        XCTAssertEqual(permission.message, "Need network access to push branch")
+        XCTAssertEqual(permission.toolInput?["sandbox_permissions"]?.stringValue, "require_escalated")
+    }
+
     func testSessionIdFallsBackToFilename() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")

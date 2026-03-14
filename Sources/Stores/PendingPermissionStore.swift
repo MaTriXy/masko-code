@@ -1,6 +1,8 @@
 import Foundation
 import Network
 
+typealias LocalPermissionDecisionHandler = (PermissionDecision) -> Bool
+
 // MARK: - Permission suggestion model (matches Claude Code protocol)
 
 struct PermissionSuggestion: Identifiable {
@@ -69,13 +71,18 @@ struct ParsedOption {
 struct PendingPermission: Identifiable {
     let id: UUID
     let event: ClaudeEvent
-    let connection: NWConnection
+    let connection: NWConnection?
+    let localDecisionHandler: LocalPermissionDecisionHandler?
     let receivedAt: Date
     /// tool_use_id correlated from the preceding PreToolUse event
     /// (PermissionRequest events from Claude Code don't include tool_use_id)
     let resolvedToolUseId: String?
 
     var toolName: String { event.toolName ?? "Unknown" }
+    var isCodexEscalation: Bool {
+        event.assistantClientKind != .claude &&
+        event.toolInput?["sandbox_permissions"]?.stringValue?.lowercased() == "require_escalated"
+    }
 
     /// Parse permission suggestions from Claude Code protocol
     var permissionSuggestions: [PermissionSuggestion] {
@@ -378,11 +385,15 @@ final class PendingPermissionStore {
             let key = "\(sid)|\(event.agentId ?? "")|\(toolName)"
             resolvedToolUseId = preToolUseCache.removeValue(forKey: key)
         }
+        if isDuplicate(event: event, resolvedToolUseId: resolvedToolUseId) {
+            return
+        }
 
         let permission = PendingPermission(
             id: UUID(),
             event: event,
             connection: connection,
+            localDecisionHandler: nil,
             receivedAt: Date(),
             resolvedToolUseId: resolvedToolUseId
         )
@@ -395,6 +406,64 @@ final class PendingPermissionStore {
         monitorConnection(connection, permissionId: permission.id)
 
         print("[masko-desktop] Permission added: \(event.toolName ?? "unknown") toolUseId=\(resolvedToolUseId ?? "nil") (pending: \(pending.count))")
+    }
+
+    /// Add a local (non-hook-connection) permission request, used for Codex log-derived escalations.
+    func addLocal(event: ClaudeEvent, onDecision: @escaping LocalPermissionDecisionHandler) {
+        let resolvedToolUseId = event.toolUseId
+        if isDuplicate(event: event, resolvedToolUseId: resolvedToolUseId) {
+            return
+        }
+
+        let permission = PendingPermission(
+            id: UUID(),
+            event: event,
+            connection: nil,
+            localDecisionHandler: onDecision,
+            receivedAt: Date(),
+            resolvedToolUseId: resolvedToolUseId
+        )
+        pending.append(permission)
+        onPendingChange?()
+        onPendingCountChange?()
+        print("[masko-desktop] Local permission added: \(event.toolName ?? "unknown") toolUseId=\(resolvedToolUseId ?? "nil") (pending: \(pending.count))")
+    }
+
+    private func isDuplicate(event: ClaudeEvent, resolvedToolUseId: String?) -> Bool {
+        guard let sessionId = event.sessionId else { return false }
+
+        if let toolUseId = resolvedToolUseId,
+           pending.contains(where: {
+               $0.event.sessionId == sessionId &&
+               ($0.event.toolUseId == toolUseId || $0.resolvedToolUseId == toolUseId)
+           }) {
+            print("[masko-desktop] Dropping duplicate permission for toolUseId=\(toolUseId)")
+            return true
+        }
+
+        let incomingSignature = canonicalToolInputSignature(event.toolInput)
+        if pending.contains(where: { existing in
+            existing.event.sessionId == sessionId &&
+            existing.event.agentId == event.agentId &&
+            existing.event.toolName == event.toolName &&
+            canonicalToolInputSignature(existing.event.toolInput) == incomingSignature
+        }) {
+            print("[masko-desktop] Dropping duplicate permission for \(event.toolName ?? "unknown") in session \(sessionId)")
+            return true
+        }
+
+        return false
+    }
+
+    private func canonicalToolInputSignature(_ input: [String: AnyCodable]?) -> String {
+        guard let input else { return "" }
+        let raw = input.mapValues(\.value)
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return raw.description
+        }
+        return json
     }
 
     func collapse(id: UUID) {
@@ -443,7 +512,7 @@ final class PendingPermissionStore {
         livenessTimer = nil
         // Cancel all held NWConnections so they don't linger
         for perm in pending {
-            perm.connection.cancel()
+            perm.connection?.cancel()
         }
         pending.removeAll()
     }
@@ -454,7 +523,8 @@ final class PendingPermissionStore {
 
     private func checkConnectionLiveness() {
         let staleIds = pending.compactMap { perm -> UUID? in
-            switch perm.connection.state {
+            guard let connection = perm.connection else { return nil }
+            switch connection.state {
             case .cancelled, .failed:
                 return perm.id
             default:
@@ -517,12 +587,23 @@ final class PendingPermissionStore {
 
         collapsed.remove(id)
 
-        // Send HTTP response on the held connection
-        let (status, body, exitHint) = decision.httpResponse
-        let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\nX-Exit-Code: \(exitHint)\r\n\r\n\(body)"
-        permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-            permission.connection.cancel()
-        })
+        if let connection = permission.connection {
+            // Send HTTP response on the held hook connection (Claude Code path)
+            let (status, body, exitHint) = decision.httpResponse
+            let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\nX-Exit-Code: \(exitHint)\r\n\r\n\(body)"
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        } else if let localDecisionHandler = permission.localDecisionHandler {
+            // Local resolver (Codex log-derived path)
+            let wasHandled = localDecisionHandler(decision)
+            if !wasHandled {
+                print("[masko-desktop] Local permission decision could not be delivered for \(permission.toolName)")
+                return
+            }
+        } else {
+            print("[masko-desktop] No permission transport available for \(permission.toolName)")
+        }
 
         pending.remove(at: index)
         onPendingChange?()
@@ -536,6 +617,10 @@ final class PendingPermissionStore {
     func resolveWithAnswers(id: UUID, answers: [String: String]) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
+        guard let connection = permission.connection else {
+            resolve(id: id, decision: .allow)
+            return
+        }
 
         collapsed.remove(id)
 
@@ -562,8 +647,8 @@ final class PendingPermissionStore {
         if let data = try? JSONSerialization.data(withJSONObject: responseObj),
            let body = String(data: data, encoding: .utf8) {
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
             })
         }
 
@@ -578,6 +663,10 @@ final class PendingPermissionStore {
     func resolveWithFeedback(id: UUID, feedback: String) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
+        guard let connection = permission.connection else {
+            resolve(id: id, decision: .allow)
+            return
+        }
 
         collapsed.remove(id)
 
@@ -602,8 +691,8 @@ final class PendingPermissionStore {
         if let data = try? JSONSerialization.data(withJSONObject: responseObj),
            let body = String(data: data, encoding: .utf8) {
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
             })
         }
 
@@ -618,6 +707,10 @@ final class PendingPermissionStore {
     func resolveWithPermissions(id: UUID, suggestions: [PermissionSuggestion]) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
+        guard let connection = permission.connection else {
+            resolve(id: id, decision: .allow)
+            return
+        }
 
         collapsed.remove(id)
 
@@ -635,8 +728,8 @@ final class PendingPermissionStore {
         if let data = try? JSONSerialization.data(withJSONObject: responseObj),
            let body = String(data: data, encoding: .utf8) {
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
             })
         }
 
