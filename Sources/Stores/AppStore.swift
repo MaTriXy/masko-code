@@ -333,20 +333,23 @@ final class AppStore {
     }
 
     private func handleLocalCodexPermissionResolution(event: ClaudeEvent, resolution: LocalPermissionResolution) -> Bool {
-        // Current Codex integration is one-way (session logs), so we record the decision
-        // locally to drive overlay state until a bidirectional approval channel is available.
+        // Try to route local mascot decisions back to the active Codex terminal process.
+        if CodexInteractiveBridge.submit(resolution: resolution, event: event) {
+            return true
+        }
+
         let session = event.sessionId ?? "unknown"
         switch resolution {
         case .decision(let decision):
-            print("[masko-desktop] Codex local permission \(decision.rawValue): \(event.toolName ?? "unknown") session=\(session)")
+            print("[masko-desktop] Codex local permission unresolved \(decision.rawValue): \(event.toolName ?? "unknown") session=\(session)")
         case .answers(let answers):
-            print("[masko-desktop] Codex local answers captured for session=\(session): \(answers.keys.sorted())")
+            print("[masko-desktop] Codex local answers unresolved for session=\(session): \(answers.keys.sorted())")
         case .feedback(let feedback):
-            print("[masko-desktop] Codex local feedback captured for session=\(session): \(feedback.prefix(80))")
+            print("[masko-desktop] Codex local feedback unresolved for session=\(session): \(feedback.prefix(80))")
         case .permissionSuggestions(let suggestions):
-            print("[masko-desktop] Codex local permission suggestions captured for session=\(session): \(suggestions.count)")
+            print("[masko-desktop] Codex local permission suggestions unresolved for session=\(session): \(suggestions.count)")
         }
-        return true
+        return false
     }
 
     /// Recompute which overlay card has priority and sync to the hotkey shared state.
