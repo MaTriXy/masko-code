@@ -34,6 +34,19 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(result.events.first?.source, "codex-desktop")
     }
 
+    func testSessionMetaMapsExecSourceToCliWhenOriginatorIsCodexExec() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = """
+        {"type":"session_meta","payload":{"id":"\(sessionId)","cwd":"/Users/test/project","source":"exec","originator":"codex_exec"}}
+        """
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: nil)
+
+        XCTAssertEqual(result.events.count, 1)
+        XCTAssertEqual(result.events.first?.source, "codex-cli")
+    }
+
     func testSessionMetaMapsToDesktopForVscodeVariantSource() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
@@ -325,6 +338,60 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(result.events.first?.message, "Done with implementation")
     }
 
+    func testResponseItemCommentaryAssistantMessageIsIgnoredToAvoidDuplicateNotification() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}]}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertTrue(result.events.isEmpty)
+    }
+
+    func testResponseItemFinalAnswerAssistantMessageIsIgnoredToAvoidDuplicateNotification() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertTrue(result.events.isEmpty)
+    }
+
+    func testResponseItemUserMessageIsIgnoredToAvoidInstructionNoise() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"User prompt"}]}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertTrue(result.events.isEmpty)
+    }
+
     func testResponseItemReasoningMapsToNotification() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let context = CodexSessionContext(
@@ -392,10 +459,11 @@ final class CodexEventMapperTests: XCTestCase {
         let outputLine = #"""
         {"type":"response_item","payload":{"type":"function_call_output","call_id":"call_abc","status":"completed","output":"{\"exit_code\":0}"}}
         """#
-        let outputResult = CodexEventMapper.parse(line: outputLine, fileURL: fileURL, context: context)
+        let outputResult = CodexEventMapper.parse(line: outputLine, fileURL: fileURL, context: callResult.context ?? context)
         XCTAssertEqual(outputResult.events.count, 1)
         let postTool = try XCTUnwrap(outputResult.events.first)
         XCTAssertEqual(postTool.hookEventName, HookEventType.postToolUse.rawValue)
+        XCTAssertEqual(postTool.toolName, "exec_command")
         XCTAssertEqual(postTool.toolUseId, "call_abc")
         XCTAssertEqual(postTool.toolResponse?["exit_code"]?.intValue, 0)
     }
@@ -471,6 +539,31 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(postTool.hookEventName, HookEventType.postToolUseFailure.rawValue)
         XCTAssertEqual(postTool.toolUseId, "call_custom_fail")
         XCTAssertEqual(postTool.toolResponse?["error"]?.stringValue, "tool crashed")
+    }
+
+    func testCustomToolCallOutputDetectsFailureFromMetadataExitCodeAndPreservesToolName() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs",
+            toolNamesByCallId: ["call_custom_apply_patch": "apply_patch"]
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom_apply_patch","output":"{\"output\":\"patch failed\",\"metadata\":{\"exit_code\":1,\"duration_seconds\":0.1}}"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 1)
+        let postTool = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(postTool.hookEventName, HookEventType.postToolUseFailure.rawValue)
+        XCTAssertEqual(postTool.toolName, "apply_patch")
+        XCTAssertEqual(postTool.toolUseId, "call_custom_apply_patch")
+        let metadata = try XCTUnwrap(postTool.toolResponse?["metadata"]?.value as? [String: Any])
+        XCTAssertEqual(metadata["exit_code"] as? Int, 1)
     }
 
     func testFunctionCallWithEscalatedSandboxEmitsPermissionRequest() throws {

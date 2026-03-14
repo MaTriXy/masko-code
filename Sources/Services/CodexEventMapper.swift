@@ -5,6 +5,7 @@ struct CodexSessionContext {
     var cwd: String?
     var source: String?
     var originator: String?
+    var toolNamesByCallId: [String: String] = [:]
 
     var normalizedSource: String {
         let sourceValue = source?.lowercased() ?? ""
@@ -12,18 +13,27 @@ struct CodexSessionContext {
         if sourceValue.contains("vscode") || sourceValue.contains("desktop") || originatorValue.contains("desktop") {
             return "codex-desktop"
         }
-        if sourceValue == "cli" || sourceValue.contains("codex-cli") || originatorValue.contains("codex_cli") {
+        if sourceValue == "cli"
+            || sourceValue == "exec"
+            || sourceValue.contains("codex-cli")
+            || originatorValue.contains("codex_cli")
+            || originatorValue.contains("codex_exec") {
             return "codex-cli"
         }
         return "codex"
     }
 
     func merged(with other: CodexSessionContext) -> CodexSessionContext {
-        CodexSessionContext(
+        var mergedToolNames = toolNamesByCallId
+        for (callId, toolName) in other.toolNamesByCallId {
+            mergedToolNames[callId] = toolName
+        }
+        return CodexSessionContext(
             sessionId: sessionId,
             cwd: other.cwd ?? cwd,
             source: other.source ?? source,
-            originator: other.originator ?? originator
+            originator: other.originator ?? originator,
+            toolNamesByCallId: mergedToolNames
         )
     }
 }
@@ -364,14 +374,23 @@ enum CodexEventMapper {
             ]
 
         case "response_item":
+            if let updatedContext = recordToolCallContext(payload: payload, context: workingContext) {
+                workingContext = updatedContext
+                result.context = workingContext
+            }
             result.events = mapToolEvents(
                 payload: payload,
                 sessionId: sessionId,
                 cwd: workingContext.cwd,
-                source: source
+                source: source,
+                context: workingContext
             )
 
         case "function_call":
+            if let updatedContext = recordToolCallContext(payload: payload, context: workingContext) {
+                workingContext = updatedContext
+                result.context = workingContext
+            }
             result.events = mapLegacyToolCall(
                 payload: payload,
                 sessionId: sessionId,
@@ -384,7 +403,8 @@ enum CodexEventMapper {
                 payload: payload,
                 sessionId: sessionId,
                 cwd: workingContext.cwd,
-                source: source
+                source: source,
+                context: workingContext
             )
 
         default:
@@ -398,7 +418,8 @@ enum CodexEventMapper {
         payload: [String: Any],
         sessionId: String,
         cwd: String?,
-        source: String
+        source: String,
+        context: CodexSessionContext
     ) -> [ClaudeEvent] {
         guard let payloadType = payload["type"] as? String else { return [] }
 
@@ -456,17 +477,20 @@ enum CodexEventMapper {
             let hookName = isToolOutputFailure(payload: payload, output: output)
                 ? HookEventType.postToolUseFailure.rawValue
                 : HookEventType.postToolUse.rawValue
+            let toolName = resolvedToolName(payload: payload, context: context)
             return [
                 ClaudeEvent(
                     hookEventName: hookName,
                     sessionId: sessionId,
                     cwd: cwd,
+                    toolName: toolName,
                     toolResponse: codableMap(output),
                     toolUseId: payload["call_id"] as? String ?? payload["id"] as? String,
                     source: source
                 ),
             ]
         case "message":
+            guard !shouldIgnoreResponseMessageNotification(payload: payload) else { return [] }
             guard let message = codexResponseMessageText(payload: payload) else { return [] }
             let role = payload["role"] as? String
             let notificationType = role == "assistant" ? "codex_agent_message" : "codex_message"
@@ -582,7 +606,8 @@ enum CodexEventMapper {
         payload: [String: Any],
         sessionId: String,
         cwd: String?,
-        source: String
+        source: String,
+        context: CodexSessionContext
     ) -> [ClaudeEvent] {
         let output = toolOutput(payload["output"])
         return [
@@ -592,6 +617,7 @@ enum CodexEventMapper {
                     : HookEventType.postToolUse.rawValue,
                 sessionId: sessionId,
                 cwd: cwd,
+                toolName: resolvedToolName(payload: payload, context: context),
                 toolResponse: codableMap(output),
                 toolUseId: payload["call_id"] as? String ?? payload["id"] as? String,
                 source: source
@@ -662,7 +688,36 @@ enum CodexEventMapper {
         if containsErrorPayload(output["error"]) {
             return true
         }
+        if let metadata = output["metadata"] as? [String: Any] {
+            if let exitCode = integerValue(metadata["exit_code"]), exitCode != 0 {
+                return true
+            }
+            if containsErrorPayload(metadata["error"]) {
+                return true
+            }
+        }
         return false
+    }
+
+    private static func recordToolCallContext(payload: [String: Any], context: CodexSessionContext) -> CodexSessionContext? {
+        guard let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String,
+              let toolName = payload["name"] as? String,
+              !toolName.isEmpty else {
+            return nil
+        }
+        var updated = context
+        updated.toolNamesByCallId[toolUseId] = toolName
+        return updated
+    }
+
+    private static func resolvedToolName(payload: [String: Any], context: CodexSessionContext) -> String? {
+        if let toolName = payload["name"] as? String, !toolName.isEmpty {
+            return toolName
+        }
+        if let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String {
+            return context.toolNamesByCallId[toolUseId]
+        }
+        return nil
     }
 
     private static func integerValue(_ value: Any?) -> Int? {
@@ -814,6 +869,19 @@ enum CodexEventMapper {
             }
         }
         return payload["message"] as? String
+    }
+
+    private static func shouldIgnoreResponseMessageNotification(payload: [String: Any]) -> Bool {
+        let role = (payload["role"] as? String)?.lowercased() ?? ""
+        switch role {
+        case "developer", "system", "user":
+            return true
+        case "assistant":
+            let phase = (payload["phase"] as? String)?.lowercased()
+            return phase == "commentary" || phase == "final_answer"
+        default:
+            return false
+        }
     }
 
     private static func codexReasoningSummary(payload: [String: Any]) -> String? {
