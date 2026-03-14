@@ -9,6 +9,13 @@ enum CodexInteractiveBridge {
         let tty: String?
     }
 
+    private static let codexProcessMatchers: [[String]] = [
+        ["-x", "codex"],
+        ["-f", "codex_cli_rs"],
+        ["-f", "Codex.app"],
+        ["-f", "Codex Desktop"],
+    ]
+
     static func submit(
         resolution: LocalPermissionResolution,
         event: ClaudeEvent,
@@ -66,6 +73,22 @@ enum CodexInteractiveBridge {
             }
         }
 
+        let ttyInfos = infos.filter { info in
+            guard let tty = info.tty else { return false }
+            return !tty.isEmpty
+        }
+
+        if ttyInfos.count == 1 {
+            return ttyInfos.first
+        }
+
+        // Desktop sessions are frequently launched without a reliable cwd match.
+        // Prefer the newest interactive TTY process so mascot approvals still route.
+        if event.assistantClientKind == .codexDesktop,
+           let newestTTY = ttyInfos.max(by: { $0.pid < $1.pid }) {
+            return newestTTY
+        }
+
         // No cwd match: only safe fallback is a single visible Codex process.
         if infos.count == 1 {
             return infos.first
@@ -75,19 +98,24 @@ enum CodexInteractiveBridge {
     }
 
     private static func runningCodexProcesses() -> [ProcessInfo] {
-        let pids = runCommand("/usr/bin/pgrep", arguments: ["-x", "codex"])
-            .split(separator: "\n")
-            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let pids = Set(codexProcessMatchers.flatMap(pidsForMatcher))
+        let sortedPids = pids.sorted()
 
-        guard !pids.isEmpty else { return [] }
+        guard !sortedPids.isEmpty else { return [] }
 
-        return pids.map { pid in
+        return sortedPids.map { pid in
             ProcessInfo(
                 pid: pid,
                 cwd: cwdForPid(pid),
                 tty: ttyForPid(pid)
             )
         }
+    }
+
+    private static func pidsForMatcher(_ matcher: [String]) -> [Int] {
+        runCommand("/usr/bin/pgrep", arguments: matcher)
+            .split(separator: "\n")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
     private static func cwdForPid(_ pid: Int) -> String? {

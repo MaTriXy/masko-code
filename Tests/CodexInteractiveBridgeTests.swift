@@ -60,6 +60,34 @@ final class CodexInteractiveBridgeTests: XCTestCase {
         XCTAssertFalse(ok)
     }
 
+    func testSubmitSelectsNewestTTYForCodexDesktopWhenNoCwdMatch() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.permissionRequest.rawValue,
+            sessionId: "sid-2b",
+            cwd: nil,
+            toolName: "exec_command",
+            source: "codex-desktop"
+        )
+
+        let processes = [
+            CodexInteractiveBridge.ProcessInfo(pid: 120, cwd: nil, tty: "/dev/ttys010"),
+            CodexInteractiveBridge.ProcessInfo(pid: 125, cwd: nil, tty: "/dev/ttys011"),
+        ]
+
+        var writtenPath: String?
+        let ok = CodexInteractiveBridge.submit(
+            resolution: .decision(.allow),
+            event: event,
+            processInfos: processes
+        ) { path, _ in
+            writtenPath = path
+            return true
+        }
+
+        XCTAssertTrue(ok)
+        XCTAssertEqual(writtenPath, "/dev/ttys011")
+    }
+
     func testInputTextForAnswersAndFeedback() {
         let answersText = CodexInteractiveBridge.inputText(for: .answers([
             "b": "second",
