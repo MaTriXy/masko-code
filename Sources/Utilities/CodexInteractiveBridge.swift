@@ -76,9 +76,12 @@ enum CodexInteractiveBridge {
         case .feedback(let feedback):
             let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
-            return trimmed + "\n"
-        case .permissionSuggestions:
-            // Closest terminal equivalent: accept current prompt.
+            // Codex approval prompts expose feedback as a distinct branch before text entry.
+            return "e\n" + trimmed + "\n"
+        case .permissionSuggestions(let suggestions):
+            if suggestions.contains(where: { $0.type == "addRules" }) {
+                return "a\n"
+            }
             return "y\n"
         }
     }

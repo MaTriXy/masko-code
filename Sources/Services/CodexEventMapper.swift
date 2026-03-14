@@ -259,7 +259,11 @@ enum CodexEventMapper {
                         toolInput: codableMap(toolInput),
                         toolUseId: toolUseId,
                         message: codexPermissionMessage(toolName: "request_permissions", arguments: toolInput),
-                        source: source
+                        source: source,
+                        permissionSuggestions: codexPermissionSuggestions(
+                            toolName: "request_permissions",
+                            arguments: toolInput
+                        )?.map(AnyCodable.init)
                     ),
                 ]
             case "exec_command_begin":
@@ -318,7 +322,11 @@ enum CodexEventMapper {
                         toolInput: codableMap(toolInput),
                         toolUseId: toolUseId,
                         message: codexPermissionMessage(toolName: "exec_command", arguments: toolInput),
-                        source: source
+                        source: source,
+                        permissionSuggestions: codexPermissionSuggestions(
+                            toolName: "exec_command",
+                            arguments: toolInput
+                        )?.map(AnyCodable.init)
                     ),
                 ]
             case "mcp_tool_call_begin":
@@ -475,7 +483,11 @@ enum CodexEventMapper {
                         toolInput: codableMap(arguments),
                         toolUseId: toolUseId,
                         message: codexPermissionMessage(toolName: toolName, arguments: arguments),
-                        source: source
+                        source: source,
+                        permissionSuggestions: codexPermissionSuggestions(
+                            toolName: toolName,
+                            arguments: arguments
+                        )?.map(AnyCodable.init)
                     )
                 )
             } else if isRequestUserInput(toolName: toolName, arguments: arguments) {
@@ -604,7 +616,11 @@ enum CodexEventMapper {
                     toolInput: codableMap(arguments),
                     toolUseId: toolUseId,
                     message: codexPermissionMessage(toolName: toolName, arguments: arguments),
-                    source: source
+                    source: source,
+                    permissionSuggestions: codexPermissionSuggestions(
+                        toolName: toolName,
+                        arguments: arguments
+                    )?.map(AnyCodable.init)
                 )
             )
         } else if isRequestUserInput(toolName: toolName, arguments: arguments) {
@@ -850,6 +866,26 @@ enum CodexEventMapper {
         return "Codex requested your input"
     }
 
+    private static func codexPermissionSuggestions(
+        toolName: String,
+        arguments: [String: Any]
+    ) -> [[String: Any]]? {
+        guard let prefixRule = codexPrefixRule(arguments["prefix_rule"]),
+              !prefixRule.isEmpty else {
+            return nil
+        }
+
+        return [[
+            "type": "addRules",
+            "destination": "session",
+            "behavior": "allow",
+            "rules": [[
+                "toolName": toolName,
+                "ruleContent": prefixRule.joined(separator: " "),
+            ]],
+        ]]
+    }
+
     private static func codexExecApprovalInput(payload: [String: Any]) -> [String: Any] {
         var input = payload
         input.removeValue(forKey: "type")
@@ -860,6 +896,17 @@ enum CodexEventMapper {
             input["sandbox_permissions"] = "require_escalated"
         }
         return input
+    }
+
+    private static func codexPrefixRule(_ value: Any?) -> [String]? {
+        if let values = value as? [String], !values.isEmpty {
+            return values
+        }
+        if let values = value as? [Any] {
+            let strings = values.compactMap { $0 as? String }.filter { !$0.isEmpty }
+            return strings.isEmpty ? nil : strings
+        }
+        return nil
     }
 
     private static func codexMcpToolName(payload: [String: Any]) -> String? {

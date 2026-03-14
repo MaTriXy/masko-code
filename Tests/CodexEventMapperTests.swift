@@ -166,6 +166,30 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(permission.message, "Need network access to push")
     }
 
+    func testExecApprovalRequestMapsPrefixRuleToPermissionSuggestion() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"event_msg","payload":{"type":"exec_approval_request","call_id":"call_exec_prefix","command":["git","push"],"cwd":"/Users/test/project","reason":"Need network access to push","prefix_rule":["git","push"],"parsed_cmd":[]}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        let permission = try XCTUnwrap(result.events.last)
+        let suggestions = try XCTUnwrap(permission.permissionSuggestions?.compactMap { $0.value as? [String: Any] })
+        XCTAssertEqual(suggestions.count, 1)
+        XCTAssertEqual(suggestions.first?["type"] as? String, "addRules")
+        let rules = try XCTUnwrap(suggestions.first?["rules"] as? [[String: String]])
+        XCTAssertEqual(rules.first?["toolName"], "exec_command")
+        XCTAssertEqual(rules.first?["ruleContent"], "git push")
+    }
+
     func testEventMsgExecCommandBeginAndEndMapToToolLifecycle() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let context = CodexSessionContext(
@@ -663,6 +687,29 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(permission.toolName, "exec_command")
         XCTAssertEqual(permission.message, "Need network access to push branch")
         XCTAssertEqual(permission.toolInput?["sandbox_permissions"]?.stringValue, "require_escalated")
+    }
+
+    func testFunctionCallPermissionRequestIncludesPrefixRuleSuggestion() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_perm_rule","arguments":"{\"cmd\":\"git push\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Need network access to push branch\",\"prefix_rule\":[\"git\",\"push\"]}"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        let permission = try XCTUnwrap(result.events.last)
+        let suggestions = try XCTUnwrap(permission.permissionSuggestions?.compactMap { $0.value as? [String: Any] })
+        XCTAssertEqual(suggestions.count, 1)
+        let rules = try XCTUnwrap(suggestions.first?["rules"] as? [[String: String]])
+        XCTAssertEqual(rules.first?["toolName"], "exec_command")
+        XCTAssertEqual(rules.first?["ruleContent"], "git push")
     }
 
     func testRequestUserInputMapsToAskUserQuestionPermissionRequest() throws {

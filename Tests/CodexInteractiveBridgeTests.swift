@@ -96,7 +96,23 @@ final class CodexInteractiveBridgeTests: XCTestCase {
         XCTAssertEqual(answersText, "first\nsecond\n")
 
         let feedbackText = CodexInteractiveBridge.inputText(for: .feedback("  looks good  "))
-        XCTAssertEqual(feedbackText, "looks good\n")
+        XCTAssertEqual(feedbackText, "e\nlooks good\n")
+    }
+
+    func testInputTextForPermissionSuggestionsUsesAlwaysApproveShortcut() {
+        let suggestions = [
+            PermissionSuggestion(
+                type: "addRules",
+                destination: "session",
+                behavior: "allow",
+                rules: [["toolName": "exec_command", "ruleContent": "git push"]],
+                mode: nil
+            ),
+        ]
+
+        let inputText = CodexInteractiveBridge.inputText(for: .permissionSuggestions(suggestions))
+
+        XCTAssertEqual(inputText, "a\n")
     }
 
     func testInputTextForAnswersUsesQuestionOrderFromEvent() {
