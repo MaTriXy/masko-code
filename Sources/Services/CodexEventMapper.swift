@@ -37,6 +37,7 @@ enum CodexEventMapper {
     private static let sessionIdRegex = try! NSRegularExpression(
         pattern: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
     )
+    private static let exitCodeRegex = try! NSRegularExpression(pattern: #"Exit code:\s*(-?\d+)"#)
 
     static func sessionId(fromFileURL fileURL: URL) -> String? {
         let filename = fileURL.lastPathComponent
@@ -403,7 +404,7 @@ enum CodexEventMapper {
 
         switch payloadType {
         case "function_call", "custom_tool_call":
-            let arguments = parseJSONObject(payload["arguments"]) ?? [:]
+            let arguments = toolArguments(payload: payload, payloadType: payloadType)
             let toolName = payload["name"] as? String ?? "tool"
             let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String
             var events: [ClaudeEvent] = [
@@ -451,13 +452,10 @@ enum CodexEventMapper {
             return events
 
         case "function_call_output", "custom_tool_call_output":
-            let output = parseJSONObject(payload["output"])
-            let hookName: String
-            if (payload["status"] as? String)?.lowercased() == "failed" {
-                hookName = HookEventType.postToolUseFailure.rawValue
-            } else {
-                hookName = HookEventType.postToolUse.rawValue
-            }
+            let output = toolOutput(payload["output"])
+            let hookName = isToolOutputFailure(payload: payload, output: output)
+                ? HookEventType.postToolUseFailure.rawValue
+                : HookEventType.postToolUse.rawValue
             return [
                 ClaudeEvent(
                     hookEventName: hookName,
@@ -533,7 +531,10 @@ enum CodexEventMapper {
         cwd: String?,
         source: String
     ) -> [ClaudeEvent] {
-        let arguments = parseJSONObject(payload["arguments"]) ?? [:]
+        let arguments = toolArguments(
+            payload: payload,
+            payloadType: payload["type"] as? String ?? "function_call"
+        )
         let toolName = payload["name"] as? String ?? "tool"
         let toolUseId = payload["call_id"] as? String ?? payload["id"] as? String
         var events: [ClaudeEvent] = [
@@ -583,10 +584,12 @@ enum CodexEventMapper {
         cwd: String?,
         source: String
     ) -> [ClaudeEvent] {
-        let output = parseJSONObject(payload["output"])
+        let output = toolOutput(payload["output"])
         return [
             ClaudeEvent(
-                hookEventName: HookEventType.postToolUse.rawValue,
+                hookEventName: isToolOutputFailure(payload: payload, output: output)
+                    ? HookEventType.postToolUseFailure.rawValue
+                    : HookEventType.postToolUse.rawValue,
                 sessionId: sessionId,
                 cwd: cwd,
                 toolResponse: codableMap(output),
@@ -606,6 +609,96 @@ enum CodexEventMapper {
             return obj
         }
         return nil
+    }
+
+    private static func toolArguments(payload: [String: Any], payloadType: String) -> [String: Any] {
+        if payloadType == "custom_tool_call",
+           let input = parseJSONObject(payload["input"]) {
+            return input
+        }
+
+        if let arguments = parseJSONObject(payload["arguments"]) {
+            return arguments
+        }
+
+        if let input = parseJSONObject(payload["input"]) {
+            return input
+        }
+
+        return [:]
+    }
+
+    private static func toolOutput(_ value: Any?) -> [String: Any]? {
+        if let dict = parseJSONObject(value) {
+            return dict
+        }
+
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        var output: [String: Any] = ["output": string]
+        if let exitCode = exitCode(fromOutputText: string) {
+            output["exit_code"] = exitCode
+        }
+        return output
+    }
+
+    private static func isToolOutputFailure(payload: [String: Any], output: [String: Any]?) -> Bool {
+        let status = (payload["status"] as? String)?.lowercased()
+        if status == "failed" || status == "error" {
+            return true
+        }
+
+        if let exitCode = integerValue(payload["exit_code"]), exitCode != 0 {
+            return true
+        }
+
+        if containsErrorPayload(payload["error"]) {
+            return true
+        }
+
+        guard let output else { return false }
+        if let exitCode = integerValue(output["exit_code"]), exitCode != 0 {
+            return true
+        }
+        if containsErrorPayload(output["error"]) {
+            return true
+        }
+        return false
+    }
+
+    private static func integerValue(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        if let value = value as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    private static func containsErrorPayload(_ value: Any?) -> Bool {
+        if let string = value as? String {
+            return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if let dict = value as? [String: Any] {
+            return !dict.isEmpty
+        }
+        if let array = value as? [Any] {
+            return !array.isEmpty
+        }
+        return false
+    }
+
+    private static func exitCode(fromOutputText text: String) -> Int? {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = exitCodeRegex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let codeRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return Int(text[codeRange])
     }
 
     private static func codableMap(_ dict: [String: Any]?) -> [String: AnyCodable]? {

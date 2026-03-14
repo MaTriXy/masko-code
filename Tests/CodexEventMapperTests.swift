@@ -400,6 +400,79 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(postTool.toolResponse?["exit_code"]?.intValue, 0)
     }
 
+    func testCustomToolCallReadsInputFieldAndSynthesizesPermissionRequest() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"custom_tool_call","name":"exec_command","call_id":"call_custom_perm","input":"{\"cmd\":\"git push\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Need network access to push\"}"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 2)
+        let preTool = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(preTool.hookEventName, HookEventType.preToolUse.rawValue)
+        XCTAssertEqual(preTool.toolUseId, "call_custom_perm")
+        XCTAssertEqual(preTool.toolInput?["cmd"]?.stringValue, "git push")
+        XCTAssertEqual(preTool.toolInput?["sandbox_permissions"]?.stringValue, "require_escalated")
+
+        let permission = try XCTUnwrap(result.events.last)
+        XCTAssertEqual(permission.hookEventName, HookEventType.permissionRequest.rawValue)
+        XCTAssertEqual(permission.toolUseId, "call_custom_perm")
+        XCTAssertEqual(permission.message, "Need network access to push")
+    }
+
+    func testFunctionCallOutputDetectsFailureFromExitCodeTextWithoutStatus() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"function_call_output","call_id":"call_fail_text","output":"Exit code: 1\nWall time: 0.1 seconds\nOutput:\npermission denied"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 1)
+        let postTool = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(postTool.hookEventName, HookEventType.postToolUseFailure.rawValue)
+        XCTAssertEqual(postTool.toolUseId, "call_fail_text")
+        XCTAssertEqual(postTool.toolResponse?["exit_code"]?.intValue, 1)
+        XCTAssertEqual(postTool.toolResponse?["output"]?.stringValue, "Exit code: 1\nWall time: 0.1 seconds\nOutput:\npermission denied")
+    }
+
+    func testCustomToolCallOutputDetectsFailureFromErrorPayloadWithoutStatus() throws {
+        let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
+        let context = CodexSessionContext(
+            sessionId: sessionId,
+            cwd: "/Users/test/project",
+            source: "cli",
+            originator: "codex_cli_rs"
+        )
+        let fileURL = URL(fileURLWithPath: "/tmp/rollout-2026-03-09T23-54-07-\(sessionId).jsonl")
+        let line = #"""
+        {"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom_fail","output":"{\"error\":\"tool crashed\"}"}}
+        """#
+
+        let result = CodexEventMapper.parse(line: line, fileURL: fileURL, context: context)
+
+        XCTAssertEqual(result.events.count, 1)
+        let postTool = try XCTUnwrap(result.events.first)
+        XCTAssertEqual(postTool.hookEventName, HookEventType.postToolUseFailure.rawValue)
+        XCTAssertEqual(postTool.toolUseId, "call_custom_fail")
+        XCTAssertEqual(postTool.toolResponse?["error"]?.stringValue, "tool crashed")
+    }
+
     func testFunctionCallWithEscalatedSandboxEmitsPermissionRequest() throws {
         let sessionId = "019cd686-3b91-78a1-9356-21b475548352"
         let context = CodexSessionContext(
