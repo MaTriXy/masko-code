@@ -916,6 +916,13 @@ struct PermissionPromptView: View {
                     .lineLimit(2)
             }
 
+            if permission.connection == nil, permission.event.assistantClientKind != .claude {
+                Text("Response is sent to the active Codex terminal session")
+                    .font(Constants.body(size: 9, weight: .medium))
+                    .foregroundStyle(OverlayStyle.textHint)
+                    .lineLimit(1)
+            }
+
             // Code preview
             if isExpanded {
                 ScrollView(.vertical, showsIndicators: true) {
