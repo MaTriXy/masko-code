@@ -17,7 +17,7 @@ struct OnboardingView: View {
     @State private var selectedPresetSlug: String? = nil
     @State private var isLoadingPreset = false
 
-    private let totalSteps = 6
+    private let totalSteps = 7
 
     /// Advance to the next step that actually needs user action, skipping already-completed ones.
     private func nextStep(after current: Int) {
@@ -44,6 +44,7 @@ struct OnboardingView: View {
                 case 3: accessibilityStep
                 case 4: ideIntegrationStep
                 case 5: mascotStep
+                case 6: githubStarStep
                 default: EmptyView()
                 }
             }
@@ -331,8 +332,8 @@ struct OnboardingView: View {
                         .foregroundStyle(.green)
                 }
 
-                primaryButton("Let's go!") {
-                    onComplete()
+                primaryButton("Continue") {
+                    nextStep(after: 5)
                 }
             } else {
                 primaryButton(isLoadingPreset ? "Loading..." : "Activate Mascot") {
@@ -341,8 +342,42 @@ struct OnboardingView: View {
                 .opacity(selectedPresetSlug == nil ? 0.5 : 1)
                 .allowsHitTesting(selectedPresetSlug != nil && !isLoadingPreset)
 
-                skipButton { onComplete() }
+                skipButton { nextStep(after: 5) }
             }
+        }
+    }
+
+    // MARK: - Step 6: Star on GitHub
+
+    private var githubStarStep: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "star.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.yellow)
+
+            VStack(spacing: 8) {
+                Text("You're all set!")
+                    .font(Constants.heading(size: 24, weight: .bold))
+                    .foregroundStyle(Constants.textPrimary)
+
+                Text("Masko Code is free and open source.\nIf you like it, a GitHub star helps us grow!")
+                    .font(Constants.body(size: 14))
+                    .foregroundStyle(Constants.textMuted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+            }
+
+            primaryButton("Star on GitHub") {
+                if let url = URL(string: Constants.githubRepoURL) {
+                    NSWorkspace.shared.open(url)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    onComplete()
+                }
+            }
+
+            skipButton { onComplete() }
         }
     }
 

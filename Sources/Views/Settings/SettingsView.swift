@@ -311,6 +311,19 @@ struct SettingsView: View {
                             .font(.caption)
                     }
                 }
+                Link(destination: URL(string: Constants.githubRepoURL)!) {
+                    HStack {
+                        Image(systemName: "star")
+                            .foregroundColor(Constants.orangePrimary)
+                            .font(.system(size: 12))
+                        Text("Star on GitHub")
+                            .foregroundColor(Constants.orangePrimary)
+                        Spacer()
+                        Image(systemName: "arrow.up.forward")
+                            .foregroundColor(Constants.orangePrimary)
+                            .font(.caption)
+                    }
+                }
             } header: {
                 Text("About").font(Constants.heading(size: 13, weight: .semibold))
             }

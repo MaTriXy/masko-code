@@ -7,6 +7,7 @@ enum Constants {
     #else
     static let maskoBaseURL = "https://masko.ai"
     #endif
+    static let githubRepoURL = "https://github.com/RousselPaul/masko-code"
 
     // Local hook server
     static let defaultServerPort: UInt16 = 49152
