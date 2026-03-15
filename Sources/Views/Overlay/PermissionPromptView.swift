@@ -273,6 +273,12 @@ struct AskUserQuestionView: View {
     @State private var currentQuestionIndex: Int = 0
     @FocusState private var otherFieldFocused: String?
 
+    private var requiresTerminalFallback: Bool {
+        permission.connection == nil &&
+        permission.event.assistantClientKind != .claude &&
+        !CodexInteractiveBridge.supportsBackgroundReplies
+    }
+
     private var allAnswered: Bool {
         questions.allSatisfy { q in
             if usingCustom.contains(q.question) {
@@ -332,54 +338,90 @@ struct AskUserQuestionView: View {
             }
             .frame(maxHeight: 200)
 
-            // Submit / Skip
-            HStack(spacing: 5) {
-                Button {
-                    var answers: [String: String] = [:]
-                    for q in questions {
-                        if usingCustom.contains(q.question) {
-                            answers[q.question] = customInputs[q.question] ?? ""
-                        } else if q.multiSelect {
-                            answers[q.question] = (multiSelections[q.question] ?? []).sorted().joined(separator: ", ")
-                        } else {
-                            answers[q.question] = selections[q.question] ?? ""
-                        }
-                    }
-                    onAnswer(answers)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Submit")
+            if requiresTerminalFallback {
+                Text("Open the Codex terminal to answer this prompt. Background replies are not supported for this Codex build.")
+                    .font(Constants.body(size: 9, weight: .medium))
+                    .foregroundStyle(OverlayStyle.textHint)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 5) {
+                    Button {
+                        focusTerminal(pid: permission.event.terminalPid, shellPid: permission.event.shellPid, projectDir: permission.event.cwd, sessionId: permission.event.sessionId, source: permission.event.source, sessions: sessionStore.sessions)
+                    } label: {
+                        Text("Open Terminal")
                             .font(Constants.heading(size: 11, weight: .semibold))
                             .foregroundStyle(.white)
-                        if showShortcuts { ActionBadge(label: "⌘↩") }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                            .background(OverlayStyle.orange)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(allAnswered ? OverlayStyle.orange : Color.gray.opacity(0.3))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                .disabled(!allAnswered)
+                    .buttonStyle(.plain)
 
-                Button {
-                    onDeny()
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Skip")
+                    Button {
+                        onLater()
+                    } label: {
+                        Text("Later")
                             .font(Constants.heading(size: 11, weight: .semibold))
                             .foregroundStyle(OverlayStyle.denyText)
-                        if showShortcuts { ActionBadge(label: "⌘⎋") }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                            .background(Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(OverlayStyle.denyBorder, lineWidth: 1))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(OverlayStyle.denyBorder, lineWidth: 1))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-            }
+            } else {
+                // Submit / Skip
+                HStack(spacing: 5) {
+                    Button {
+                        var answers: [String: String] = [:]
+                        for q in questions {
+                            if usingCustom.contains(q.question) {
+                                answers[q.question] = customInputs[q.question] ?? ""
+                            } else if q.multiSelect {
+                                answers[q.question] = (multiSelections[q.question] ?? []).sorted().joined(separator: ", ")
+                            } else {
+                                answers[q.question] = selections[q.question] ?? ""
+                            }
+                        }
+                        onAnswer(answers)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Submit")
+                                .font(Constants.heading(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                            if showShortcuts { ActionBadge(label: "⌘↩") }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .background(allAnswered ? OverlayStyle.orange : Color.gray.opacity(0.3))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!allAnswered)
 
-            ShortcutHintBar()
+                    Button {
+                        onDeny()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Skip")
+                                .font(Constants.heading(size: 11, weight: .semibold))
+                                .foregroundStyle(OverlayStyle.denyText)
+                            if showShortcuts { ActionBadge(label: "⌘⎋") }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .background(Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(OverlayStyle.denyBorder, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                ShortcutHintBar()
+            }
         }
         .padding(8)
         .padding(tailSide.paddingEdge, OverlayStyle.tailHeight)
@@ -414,7 +456,7 @@ struct AskUserQuestionView: View {
             }
         }
         .onChange(of: hotkeyManager.confirmTrigger) { _, _ in
-            guard showShortcuts, allAnswered else { return }
+            guard showShortcuts, allAnswered, !requiresTerminalFallback else { return }
             var answers: [String: String] = [:]
             for q in questions {
                 if usingCustom.contains(q.question) {
@@ -849,6 +891,13 @@ struct PermissionPromptView: View {
     let onAllowWithPermissions: (([PermissionSuggestion]) -> Void)?
     let onLater: () -> Void
     var showShortcuts: Bool = false
+
+    private var requiresTerminalFallback: Bool {
+        permission.connection == nil &&
+        permission.event.assistantClientKind != .claude &&
+        !CodexInteractiveBridge.supportsBackgroundReplies
+    }
+
     init(permission: PendingPermission, onDecision: @escaping (PermissionDecision) -> Void, onAnswers: (([String: String]) -> Void)? = nil, onFeedback: ((String) -> Void)? = nil, onAllowWithPermissions: (([PermissionSuggestion]) -> Void)? = nil, onLater: @escaping () -> Void, showShortcuts: Bool = false) {
         self.permission = permission
         self.onDecision = onDecision
@@ -934,11 +983,11 @@ struct PermissionPromptView: View {
                     .lineLimit(2)
             }
 
-            if permission.connection == nil, permission.event.assistantClientKind != .claude {
-                Text("Response is sent to the active Codex terminal session")
+            if requiresTerminalFallback {
+                Text("Open the Codex terminal to respond. Background replies are not supported for this Codex build.")
                     .font(Constants.body(size: 9, weight: .medium))
                     .foregroundStyle(OverlayStyle.textHint)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Code preview
@@ -975,20 +1024,16 @@ struct PermissionPromptView: View {
                     .onTapGesture { isExpanded = true }
             }
 
-            // Buttons: Allow / Deny
-            let suggestions = permission.permissionSuggestions
-
-            VStack(spacing: 3) {
+            if requiresTerminalFallback {
                 HStack(spacing: 5) {
                     Button {
-                        onDecision(.allow)
+                        focusTerminal(pid: permission.event.terminalPid, shellPid: permission.event.shellPid, projectDir: permission.event.cwd, sessionId: permission.event.sessionId, source: permission.event.source, sessions: sessionStore.sessions)
                     } label: {
                         HStack(spacing: 4) {
                             Spacer(minLength: 0)
-                            Text("Allow")
+                            Text("Open Terminal")
                                 .font(Constants.heading(size: 11, weight: .semibold))
                                 .foregroundStyle(.white)
-                            if showShortcuts { ActionBadge(label: "⌘↩") }
                             Spacer(minLength: 0)
                         }
                         .padding(.vertical, 4)
@@ -998,14 +1043,13 @@ struct PermissionPromptView: View {
                     .buttonStyle(.plain)
 
                     Button {
-                        onDecision(.deny)
+                        onLater()
                     } label: {
                         HStack(spacing: 4) {
                             Spacer(minLength: 0)
-                            Text("Deny")
+                            Text("Later")
                                 .font(Constants.heading(size: 11, weight: .semibold))
                                 .foregroundStyle(OverlayStyle.denyText)
-                            if showShortcuts { ActionBadge(label: "⌘⎋") }
                             Spacer(minLength: 0)
                         }
                         .padding(.vertical, 4)
@@ -1015,40 +1059,82 @@ struct PermissionPromptView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            } else {
+                // Buttons: Allow / Deny
+                let suggestions = permission.permissionSuggestions
 
-                // "Always allow" suggestions (numbered: ⌘1, ⌘2, ...)
-                ForEach(Array(suggestions.enumerated()), id: \.element.id) { sugIndex, suggestion in
-                    Button {
-                        onAllowWithPermissions?([suggestion])
-                    } label: {
-                        HStack(spacing: 4) {
-                            Spacer(minLength: 0)
-                            Text(suggestion.displayLabel)
-                                .font(Constants.body(size: 10, weight: .medium))
-                                .foregroundStyle(OverlayStyle.denyText)
-                            if showShortcuts {
-                                ShortcutBadge(index: sugIndex, isSelected: hotkeyManager.selectedButtonIndex == sugIndex)
+                VStack(spacing: 3) {
+                    HStack(spacing: 5) {
+                        Button {
+                            onDecision(.allow)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Spacer(minLength: 0)
+                                Text("Allow")
+                                    .font(Constants.heading(size: 11, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                if showShortcuts { ActionBadge(label: "⌘↩") }
+                                Spacer(minLength: 0)
                             }
-                            Spacer(minLength: 0)
+                            .padding(.vertical, 4)
+                            .background(OverlayStyle.orange)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
                         }
-                        .padding(.vertical, 3)
-                        .background(
-                            (hotkeyManager.selectedButtonIndex == sugIndex && showShortcuts)
-                                ? OverlayStyle.orange.opacity(0.08)
-                                : Color.clear
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(
-                            (hotkeyManager.selectedButtonIndex == sugIndex && showShortcuts)
-                                ? OverlayStyle.orange
-                                : OverlayStyle.denyBorder,
-                            lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+                        .buttonStyle(.plain)
 
-            ShortcutHintBar()
+                        Button {
+                            onDecision(.deny)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Spacer(minLength: 0)
+                                Text("Deny")
+                                    .font(Constants.heading(size: 11, weight: .semibold))
+                                    .foregroundStyle(OverlayStyle.denyText)
+                                if showShortcuts { ActionBadge(label: "⌘⎋") }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, 4)
+                            .background(Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(OverlayStyle.denyBorder, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    // "Always allow" suggestions (numbered: ⌘1, ⌘2, ...)
+                    ForEach(Array(suggestions.enumerated()), id: \.element.id) { sugIndex, suggestion in
+                        Button {
+                            onAllowWithPermissions?([suggestion])
+                        } label: {
+                            HStack(spacing: 4) {
+                                Spacer(minLength: 0)
+                                Text(suggestion.displayLabel)
+                                    .font(Constants.body(size: 10, weight: .medium))
+                                    .foregroundStyle(OverlayStyle.denyText)
+                                if showShortcuts {
+                                    ShortcutBadge(index: sugIndex, isSelected: hotkeyManager.selectedButtonIndex == sugIndex)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, 3)
+                            .background(
+                                (hotkeyManager.selectedButtonIndex == sugIndex && showShortcuts)
+                                    ? OverlayStyle.orange.opacity(0.08)
+                                    : Color.clear
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(
+                                (hotkeyManager.selectedButtonIndex == sugIndex && showShortcuts)
+                                    ? OverlayStyle.orange
+                                    : OverlayStyle.denyBorder,
+                                lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                ShortcutHintBar()
+            }
         }
         .padding(8)
         .padding(tailSide.paddingEdge, OverlayStyle.tailHeight)
@@ -1056,7 +1142,7 @@ struct PermissionPromptView: View {
         .clipShape(SpeechBubbleShape(tailSide: tailSide, tailPercent: tailPercent))
         .shadow(color: OverlayStyle.cardShadow, radius: 3, x: 0, y: 2)
         .onChange(of: hotkeyManager.confirmTrigger) { _, _ in
-            guard showShortcuts else { return }
+            guard showShortcuts, !requiresTerminalFallback else { return }
             let sug = permission.permissionSuggestions
             if let idx = hotkeyManager.selectedButtonIndex, idx < sug.count {
                 // A suggestion is selected — apply it

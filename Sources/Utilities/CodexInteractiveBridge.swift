@@ -10,6 +10,10 @@ enum CodexInteractiveBridge {
         let tty: String?
     }
 
+    /// Writing bytes to the tty device path only prints to the terminal on macOS.
+    /// Codex does not currently expose a supported background input transport here.
+    static let supportsBackgroundReplies = false
+
     private static let codexProcessMatchers: [[String]] = [
         ["-x", "codex"],
         ["-x", "Codex"],
@@ -26,6 +30,10 @@ enum CodexInteractiveBridge {
     ) -> Bool {
         guard event.assistantClientKind != .claude else { return false }
         guard let input = inputText(for: resolution, event: event), !input.isEmpty else { return false }
+        guard let write = writer else {
+            print("[masko-desktop] Codex local reply transport unavailable; tty device writes do not inject input on macOS")
+            return false
+        }
 
         let infos = processInfos ?? runningCodexProcesses()
         guard let target = selectProcess(for: event, from: infos),
@@ -33,7 +41,6 @@ enum CodexInteractiveBridge {
             return false
         }
 
-        let write = writer ?? defaultTTYWriter
         let success = write(tty, input)
         if success {
             print("[masko-desktop] Codex bridge wrote resolution to \(tty) (pid=\(target.pid))")
@@ -68,21 +75,21 @@ enum CodexInteractiveBridge {
     static func inputText(for resolution: LocalPermissionResolution, event: ClaudeEvent? = nil) -> String? {
         switch resolution {
         case .decision(let decision):
-            return decision == .allow ? "y\n" : "n\n"
+            return decision == .allow ? "y\r" : "n\r"
         case .answers(let answers):
             let values = orderedAnswerValues(answers, event: event)
             guard !values.isEmpty else { return nil }
-            return values.joined(separator: "\n") + "\n"
+            return values.joined(separator: "\r") + "\r"
         case .feedback(let feedback):
             let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
             // Codex approval prompts expose feedback as a distinct branch before text entry.
-            return "e\n" + trimmed + "\n"
+            return "e\r" + trimmed + "\r"
         case .permissionSuggestions(let suggestions):
             if suggestions.contains(where: { $0.type == "addRules" }) {
-                return "a\n"
+                return "p\r"
             }
-            return "y\n"
+            return "y\r"
         }
     }
 
@@ -200,14 +207,6 @@ enum CodexInteractiveBridge {
                 return path.hasPrefix("/dev/tty") || path.hasPrefix("/dev/ttys") ? path : nil
             }
             .first
-    }
-
-    private static func defaultTTYWriter(path: String, text: String) -> Bool {
-        guard let data = text.data(using: .utf8),
-              let handle = FileHandle(forWritingAtPath: path) else { return false }
-        handle.write(data)
-        handle.closeFile()
-        return true
     }
 
     private static func defaultActivator(pid: Int) -> Bool {

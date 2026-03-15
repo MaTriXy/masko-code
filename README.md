@@ -115,6 +115,33 @@ swift build
 swift run
 ```
 
+## Local Codex Smoke Test
+
+Boot Masko from source in one terminal:
+
+```bash
+swift run masko-code
+```
+
+Run a live Codex mascot flow in another terminal:
+
+```bash
+scripts/codex-mascot-smoke.sh --manual
+```
+
+Run the automated 3-step integration check instead:
+
+```bash
+scripts/codex-mascot-smoke.sh --auto
+```
+
+The automated mode verifies that Masko ingests:
+- a Codex question turn as `AskUserQuestion`
+- an escalated approval turn with a persistent `prefix_rule` suggestion
+- the final completion marker without blank notifications or question-only completion events
+
+The automated mode drives Codex through its own PTY and verifies Masko ingestion. Use `--manual` if you want to inspect the overlay yourself while the prompts are live.
+
 ## Project Structure
 
 ```

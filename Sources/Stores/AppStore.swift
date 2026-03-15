@@ -386,7 +386,8 @@ final class AppStore {
     }
 
     private func handleLocalCodexPermissionResolution(event: ClaudeEvent, resolution: LocalPermissionResolution) -> Bool {
-        // Try to route local mascot decisions back to the active Codex terminal process.
+        // Codex log ingestion currently has no supported background reply transport on macOS.
+        // Keep the prompt pending when a local response cannot be delivered.
         if CodexInteractiveBridge.submit(resolution: resolution, event: event) {
             return true
         }

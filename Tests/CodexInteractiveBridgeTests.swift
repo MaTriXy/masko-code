@@ -31,7 +31,7 @@ final class CodexInteractiveBridgeTests: XCTestCase {
 
         XCTAssertTrue(ok)
         XCTAssertEqual(writtenPath, "/dev/ttys002")
-        XCTAssertEqual(writtenText, "y\n")
+        XCTAssertEqual(writtenText, "y\r")
     }
 
     func testSubmitReturnsFalseWhenAmbiguousWithoutCwdMatch() {
@@ -93,10 +93,10 @@ final class CodexInteractiveBridgeTests: XCTestCase {
             "b": "second",
             "a": "first",
         ]))
-        XCTAssertEqual(answersText, "first\nsecond\n")
+        XCTAssertEqual(answersText, "first\rsecond\r")
 
         let feedbackText = CodexInteractiveBridge.inputText(for: .feedback("  looks good  "))
-        XCTAssertEqual(feedbackText, "e\nlooks good\n")
+        XCTAssertEqual(feedbackText, "e\rlooks good\r")
     }
 
     func testInputTextForPermissionSuggestionsUsesAlwaysApproveShortcut() {
@@ -112,7 +112,7 @@ final class CodexInteractiveBridgeTests: XCTestCase {
 
         let inputText = CodexInteractiveBridge.inputText(for: .permissionSuggestions(suggestions))
 
-        XCTAssertEqual(inputText, "a\n")
+        XCTAssertEqual(inputText, "p\r")
     }
 
     func testInputTextForAnswersUsesQuestionOrderFromEvent() {
@@ -144,7 +144,7 @@ final class CodexInteractiveBridgeTests: XCTestCase {
             event: event
         )
 
-        XCTAssertEqual(answersText, "second\nfirst\n")
+        XCTAssertEqual(answersText, "second\rfirst\r")
     }
 
     func testFocusSelectsMatchingCodexDesktopProcess() {
