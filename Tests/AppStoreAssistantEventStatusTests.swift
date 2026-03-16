@@ -90,6 +90,24 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         )
     }
 
+    func testCodexRequestUserInputCompletionWithoutMatchStillDoesNotDismiss() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.postToolUseFailure.rawValue,
+            sessionId: "codex-question-tool-no-match",
+            cwd: "/tmp/project",
+            toolName: "request_user_input",
+            toolUseId: "call_question_2",
+            source: "codex-cli"
+        )
+
+        XCTAssertFalse(
+            AppStore.shouldDismissByToolUseCompletion(
+                for: event,
+                hasMatchingAskUserQuestionPermission: false
+            )
+        )
+    }
+
     func testCodexNonQuestionToolCompletionStillDismissesMatchingPermission() {
         let event = ClaudeEvent(
             hookEventName: HookEventType.postToolUse.rawValue,
@@ -104,6 +122,24 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
             AppStore.shouldDismissByToolUseCompletion(
                 for: event,
                 hasMatchingAskUserQuestionPermission: false
+            )
+        )
+    }
+
+    func testClaudeToolCompletionStillDismissesRegardlessOfQuestionMatchFlag() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.postToolUse.rawValue,
+            sessionId: "claude-tool",
+            cwd: "/tmp/project",
+            toolName: "Bash",
+            toolUseId: "toolu_1",
+            source: "claude"
+        )
+
+        XCTAssertTrue(
+            AppStore.shouldDismissByToolUseCompletion(
+                for: event,
+                hasMatchingAskUserQuestionPermission: true
             )
         )
     }
