@@ -10,6 +10,7 @@ final class AppStore {
 
     let localServer = LocalServer()
     let codexSessionMonitor = CodexSessionMonitor()
+    let codexAppServerClient = CodexAppServerClient()
     let eventStore = EventStore()
     let sessionStore = SessionStore()
     let notificationStore = NotificationStore()
@@ -45,21 +46,30 @@ final class AppStore {
     static func assistantEventIngestionStatus(
         localServerRunning: Bool,
         localServerPort: UInt16,
-        codexMonitorRunning: Bool
+        codexMonitorRunning: Bool,
+        codexAppServerRunning: Bool
     ) -> AssistantEventIngestionStatus {
         let text: String
-        switch (localServerRunning, codexMonitorRunning) {
-        case (true, true):
+        switch (localServerRunning, codexMonitorRunning, codexAppServerRunning) {
+        case (true, true, true):
+            text = "Listening on \(localServerPort) + Codex logs + app-server"
+        case (true, true, false):
             text = "Listening on \(localServerPort) + Codex logs"
-        case (true, false):
+        case (true, false, true):
+            text = "Listening on \(localServerPort) + Codex app-server"
+        case (true, false, false):
             text = "Listening on \(localServerPort)"
-        case (false, true):
+        case (false, true, true):
+            text = "Listening to Codex logs + app-server"
+        case (false, true, false):
             text = "Listening to Codex logs"
-        case (false, false):
+        case (false, false, true):
+            text = "Listening to Codex app-server"
+        case (false, false, false):
             text = "Offline"
         }
         return AssistantEventIngestionStatus(
-            isActive: localServerRunning || codexMonitorRunning,
+            isActive: localServerRunning || codexMonitorRunning || codexAppServerRunning,
             text: text
         )
     }
@@ -90,7 +100,8 @@ final class AppStore {
         Self.assistantEventIngestionStatus(
             localServerRunning: localServer.isRunning,
             localServerPort: localServer.port,
-            codexMonitorRunning: codexSessionMonitor.isRunning
+            codexMonitorRunning: codexSessionMonitor.isRunning,
+            codexAppServerRunning: codexAppServerClient.isRunning
         )
     }
     var isAssistantEventIngestionActive: Bool { assistantEventIngestionStatus.isActive }
@@ -118,6 +129,14 @@ final class AppStore {
 
         // Wire Codex session logs → shared event pipeline
         codexSessionMonitor.onEventReceived = { [weak self] event in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.handleIncomingEvent(event)
+            }
+        }
+
+        // Wire Codex app-server notifications/requests → shared event pipeline
+        codexAppServerClient.onEventReceived = { [weak self] event in
             guard let self else { return }
             Task { @MainActor in
                 await self.handleIncomingEvent(event)
@@ -386,6 +405,10 @@ final class AppStore {
     }
 
     private func handleLocalCodexPermissionResolution(event: ClaudeEvent, resolution: LocalPermissionResolution) -> Bool {
+        if codexAppServerClient.submit(resolution: resolution, event: event) {
+            return true
+        }
+
         // Codex log ingestion currently has no supported background reply transport on macOS.
         // Keep the prompt pending when a local response cannot be delivered.
         if CodexInteractiveBridge.submit(resolution: resolution, event: event) {
@@ -451,6 +474,7 @@ final class AppStore {
             print("[masko-desktop] Failed to start local server: \(error)")
         }
         codexSessionMonitor.start(bootstrapRecentFiles: sessionStore.activeSessions.isEmpty)
+        codexAppServerClient.start()
 
         // Reconcile sessions when app comes to foreground (crash recovery).
         // Throttled to at most once per 30 seconds — this notification fires on every
@@ -492,6 +516,7 @@ final class AppStore {
     func stop() {
         localServer.stop()
         codexSessionMonitor.stop()
+        codexAppServerClient.stop()
         sessionStore.stopTimers()
         pendingPermissionStore.stopTimers()
         hotkeyManager.stop()

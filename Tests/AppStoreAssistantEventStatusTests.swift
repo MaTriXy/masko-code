@@ -58,7 +58,8 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: true,
             localServerPort: 49152,
-            codexMonitorRunning: true
+            codexMonitorRunning: true,
+            codexAppServerRunning: false
         )
         XCTAssertTrue(status.isActive)
         XCTAssertEqual(status.text, "Listening on 49152 + Codex logs")
@@ -68,7 +69,8 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: true,
             localServerPort: 49152,
-            codexMonitorRunning: false
+            codexMonitorRunning: false,
+            codexAppServerRunning: false
         )
         XCTAssertTrue(status.isActive)
         XCTAssertEqual(status.text, "Listening on 49152")
@@ -78,7 +80,8 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: false,
             localServerPort: 49152,
-            codexMonitorRunning: true
+            codexMonitorRunning: true,
+            codexAppServerRunning: false
         )
         XCTAssertTrue(status.isActive)
         XCTAssertEqual(status.text, "Listening to Codex logs")
@@ -88,9 +91,32 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: false,
             localServerPort: 49152,
-            codexMonitorRunning: false
+            codexMonitorRunning: false,
+            codexAppServerRunning: false
         )
         XCTAssertFalse(status.isActive)
         XCTAssertEqual(status.text, "Offline")
+    }
+
+    func testStatusWhenOnlyCodexAppServerIsActive() {
+        let status = AppStore.assistantEventIngestionStatus(
+            localServerRunning: false,
+            localServerPort: 49152,
+            codexMonitorRunning: false,
+            codexAppServerRunning: true
+        )
+        XCTAssertTrue(status.isActive)
+        XCTAssertEqual(status.text, "Listening to Codex app-server")
+    }
+
+    func testStatusWhenCodexLogAndAppServerAreActive() {
+        let status = AppStore.assistantEventIngestionStatus(
+            localServerRunning: false,
+            localServerPort: 49152,
+            codexMonitorRunning: true,
+            codexAppServerRunning: true
+        )
+        XCTAssertTrue(status.isActive)
+        XCTAssertEqual(status.text, "Listening to Codex logs + app-server")
     }
 }
