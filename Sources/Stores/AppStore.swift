@@ -64,15 +64,46 @@ final class AppStore {
         )
     }
 
-    static func shouldDismissPendingPermissions(for event: ClaudeEvent) -> Bool {
+    static func shouldDismissPendingPermissions(
+        for event: ClaudeEvent,
+        hasPendingAskUserQuestionPermission: Bool = false
+    ) -> Bool {
         switch event.eventType {
         case .userPromptSubmit:
             return true
         case .stop:
+            // Codex question turns can emit a stop marker after asking the user.
+            // Keep AskUserQuestion cards open until the user resolves them.
+            if event.assistantClientKind != .claude, hasPendingAskUserQuestionPermission {
+                return false
+            }
             return !event.isLikelyCodexQuestionPrompt
         default:
             return false
         }
+    }
+
+    static func shouldDismissByToolUseCompletion(
+        for event: ClaudeEvent,
+        hasMatchingAskUserQuestionPermission: Bool
+    ) -> Bool {
+        guard [.postToolUse, .postToolUseFailure].contains(event.eventType) else {
+            return false
+        }
+
+        guard event.assistantClientKind != .claude else {
+            return true
+        }
+
+        // Codex request_user_input completions can appear before the user answers.
+        // Do not auto-dismiss the mirrored AskUserQuestion card in that case.
+        if hasMatchingAskUserQuestionPermission {
+            return false
+        }
+        if event.toolName == "request_user_input" || event.toolName == "AskUserQuestion" {
+            return false
+        }
+        return true
     }
 
     static func shouldShowSessionFinishedToast(for event: ClaudeEvent, hasPendingPermissions: Bool) -> Bool {
@@ -339,6 +370,15 @@ final class AppStore {
         // For stop/userPromptSubmit: session is ending, dismiss all for that agent.
         if let eventType = event.eventType,
            let sid = event.sessionId {
+            let hasPendingForAgent = pendingPermissionStore.pending.contains {
+                $0.event.sessionId == sid && $0.event.agentId == event.agentId
+            }
+            let hasPendingAskUserQuestionForAgent = pendingPermissionStore.pending.contains {
+                $0.event.sessionId == sid &&
+                    $0.event.agentId == event.agentId &&
+                    $0.event.toolName == "AskUserQuestion"
+            }
+
             // Cache PreToolUse toolUseId — fires immediately before PermissionRequest
             // for the same tool call, and carries the tool_use_id that PermissionRequest lacks.
             if eventType == .preToolUse,
@@ -350,16 +390,26 @@ final class AppStore {
                 )
             }
 
-            if Self.shouldDismissPendingPermissions(for: event),
-               pendingPermissionStore.pending.contains(where: {
-                   $0.event.sessionId == sid && $0.event.agentId == event.agentId
-               }) {
+            if Self.shouldDismissPendingPermissions(
+                for: event,
+                hasPendingAskUserQuestionPermission: hasPendingAskUserQuestionForAgent
+            ), hasPendingForAgent {
                 pendingPermissionStore.dismissForAgent(sessionId: sid, agentId: event.agentId)
             } else if [.postToolUse, .postToolUseFailure].contains(eventType),
                       let toolUseId = event.toolUseId {
-                // Only dismiss the specific permission whose tool was just executed
-                // (i.e. user answered from terminal, not from the overlay).
-                pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
+                let hasMatchingAskUserQuestionPermission = pendingPermissionStore.pending.contains { permission in
+                    permission.event.sessionId == sid &&
+                        permission.event.toolName == "AskUserQuestion" &&
+                        (permission.event.toolUseId == toolUseId || permission.resolvedToolUseId == toolUseId)
+                }
+                if Self.shouldDismissByToolUseCompletion(
+                    for: event,
+                    hasMatchingAskUserQuestionPermission: hasMatchingAskUserQuestionPermission
+                ) {
+                    // Only dismiss the specific permission whose tool was just executed
+                    // (i.e. user answered from terminal, not from the overlay).
+                    pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
+                }
             }
         }
 

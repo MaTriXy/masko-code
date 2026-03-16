@@ -54,6 +54,60 @@ final class AppStoreAssistantEventStatusTests: XCTestCase {
         XCTAssertTrue(AppStore.shouldShowSessionFinishedToast(for: event, hasPendingPermissions: false))
     }
 
+    func testCodexStopWithPendingAskUserQuestionDoesNotDismiss() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.stop.rawValue,
+            sessionId: "codex-question-stop",
+            cwd: "/tmp/project",
+            source: "codex-cli",
+            reason: "completed",
+            lastAssistantMessage: "I can proceed once you answer."
+        )
+
+        XCTAssertFalse(
+            AppStore.shouldDismissPendingPermissions(
+                for: event,
+                hasPendingAskUserQuestionPermission: true
+            )
+        )
+    }
+
+    func testCodexRequestUserInputCompletionDoesNotDismissMatchingQuestionPermission() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.postToolUse.rawValue,
+            sessionId: "codex-question-tool",
+            cwd: "/tmp/project",
+            toolName: "request_user_input",
+            toolUseId: "call_question_1",
+            source: "codex-cli"
+        )
+
+        XCTAssertFalse(
+            AppStore.shouldDismissByToolUseCompletion(
+                for: event,
+                hasMatchingAskUserQuestionPermission: true
+            )
+        )
+    }
+
+    func testCodexNonQuestionToolCompletionStillDismissesMatchingPermission() {
+        let event = ClaudeEvent(
+            hookEventName: HookEventType.postToolUse.rawValue,
+            sessionId: "codex-tool",
+            cwd: "/tmp/project",
+            toolName: "exec_command",
+            toolUseId: "call_exec_1",
+            source: "codex-cli"
+        )
+
+        XCTAssertTrue(
+            AppStore.shouldDismissByToolUseCompletion(
+                for: event,
+                hasMatchingAskUserQuestionPermission: false
+            )
+        )
+    }
+
     func testStatusWhenBothClaudeAndCodexIngestionAreActive() {
         let status = AppStore.assistantEventIngestionStatus(
             localServerRunning: true,
