@@ -8,8 +8,8 @@ final class LocalServer {
     private(set) var port: UInt16 = Constants.serverPort
     private var stopped = false
 
-    var onEventReceived: ((ClaudeEvent) -> Void)?
-    var onPermissionRequest: ((ClaudeEvent, NWConnection) -> Void)?
+    var onEventReceived: ((AgentEvent) -> Void)?
+    var onPermissionRequest: ((AgentEvent, NWConnection) -> Void)?
     /// Custom input endpoint: `POST /input {"name":"x","value":true}`
     var onInputReceived: ((String, ConditionValue) -> Void)?
 
@@ -164,7 +164,7 @@ final class LocalServer {
         // Route: POST /hook — receive Claude Code hook events
         if firstLine.contains("POST /hook") {
             let decoder = JSONDecoder()
-            if let event = try? decoder.decode(ClaudeEvent.self, from: bodyData) {
+            if let event = try? decoder.decode(AgentEvent.self, from: bodyData) {
                 print("[masko-desktop] Hook received: \(event.hookEventName)")
 
                 // PermissionRequest: hold connection open for user decision

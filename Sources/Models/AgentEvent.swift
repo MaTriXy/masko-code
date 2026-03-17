@@ -1,7 +1,8 @@
 import Foundation
 
-/// A single Claude Code hook event, decoded from the JSON that the hook script forwards
-struct ClaudeEvent: Identifiable, Codable {
+/// A single agent hook event, decoded from the JSON that hook scripts forward.
+/// Used by all agent adapters (Claude Code, Copilot, Codex).
+struct AgentEvent: Identifiable, Codable {
     let id: UUID
     let hookEventName: String
     let sessionId: String?

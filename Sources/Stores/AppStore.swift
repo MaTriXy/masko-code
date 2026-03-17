@@ -3,7 +3,8 @@ import Foundation
 
 @Observable
 final class AppStore {
-    let localServer = LocalServer()
+    let eventBus = MaskoEventBus()
+    let claudeCodeAdapter = ClaudeCodeAdapter()
     let eventStore = EventStore()
     let sessionStore = SessionStore()
     let notificationStore = NotificationStore()
@@ -23,14 +24,20 @@ final class AppStore {
     /// Updated by SettingsView.task and install/uninstall actions.
     var cachedIDEStatuses: [ExtensionInstaller.IDEStatus] = []
 
-    /// Called when a Claude Code event is received — wire to OverlayManager.handleEvent
-    var onEventForOverlay: ((ClaudeEvent) -> Void)?
+    /// Convenience access to the Claude Code local server for UI status indicators
+    var localServer: LocalServer { claudeCodeAdapter.localServer }
+
+    /// Called when an agent event is received - wire to OverlayManager.handleEvent
+    var onEventForOverlay: ((AgentEvent) -> Void)?
     /// Called when a custom input is received via POST /input
     var onInputForOverlay: ((String, ConditionValue) -> Void)?
     /// Called when session phases change outside of events (e.g. interrupt detection via transcript)
     var onRefreshOverlay: (() -> Void)?
     /// Called when the session-finished toast appears/dismisses — trigger panel reposition
     var onToastChanged: (() -> Void)?
+
+    /// Expanded permission panel callback — wire to OverlayManager
+    var onExpandPermission: (() -> Void)?
 
     /// Session switcher overlay callbacks — wire to OverlayManager
     var onSessionSwitcherShow: (() -> Void)?
@@ -54,20 +61,23 @@ final class AppStore {
             notificationService: notificationService
         )
 
-        // Wire local server → event processor + overlay state machine
-        localServer.onEventReceived = { [weak self] event in
+        // Register adapters with the event bus
+        eventBus.register(claudeCodeAdapter)
+
+        // Wire event bus -> event processor + overlay state machine
+        eventBus.onEvent = { [weak self] event in
             guard let self else { return }
             Task { @MainActor in
                 await self.eventProcessor.process(event)
 
                 // If a subsequent event arrives for a session with pending permissions,
-                // the user may have resolved a permission from the terminal — dismiss it.
+                // the user may have resolved a permission from the terminal - dismiss it.
                 // For postToolUse/postToolUseFailure: only dismiss the SPECIFIC tool use
                 // that completed (by toolUseId), not all permissions for the agent.
                 // For stop/userPromptSubmit: session is ending, dismiss all for that agent.
                 if let eventType = event.eventType,
                    let sid = event.sessionId {
-                    // Cache PreToolUse toolUseId — fires immediately before PermissionRequest
+                    // Cache PreToolUse toolUseId - fires immediately before PermissionRequest
                     // for the same tool call, and carries the tool_use_id that PermissionRequest lacks.
                     if eventType == .preToolUse,
                        let toolUseId = event.toolUseId,
@@ -85,13 +95,11 @@ final class AppStore {
                         self.pendingPermissionStore.dismissForAgent(sessionId: sid, agentId: event.agentId)
                     } else if [.postToolUse, .postToolUseFailure].contains(eventType),
                               let toolUseId = event.toolUseId {
-                        // Only dismiss the specific permission whose tool was just executed
-                        // (i.e. user answered from terminal, not from the overlay).
                         self.pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
                     }
                 }
 
-                // Show "task completed" toast when Claude finishes (skip interrupts)
+                // Show "task completed" toast when agent finishes (skip interrupts)
                 if event.eventType == .stop,
                    event.reason != "interrupted",
                    !self.pendingPermissionStore.pending.contains(where: { $0.event.sessionId == event.sessionId }) {
@@ -100,7 +108,6 @@ final class AppStore {
                         projectName: event.projectName ?? "Project"
                     )
                     self.syncActiveCard()
-                    // Trigger overlay panel reposition after SwiftUI renders the toast
                     self.onToastChanged?()
                 }
 
@@ -113,19 +120,19 @@ final class AppStore {
             }
         }
 
-        // Wire local server → custom input endpoint
-        localServer.onInputReceived = { [weak self] name, value in
+        // Wire event bus -> custom input endpoint
+        eventBus.onInput = { [weak self] name, value in
             guard let self else { return }
             Task { @MainActor in
                 self.onInputForOverlay?(name, value)
             }
         }
 
-        // Wire local server → permission requests (hold connection for user decision)
-        localServer.onPermissionRequest = { [weak self] event, connection in
+        // Wire event bus -> permission requests (with transport for responding)
+        eventBus.onPermissionRequest = { [weak self] event, transport in
             guard let self else { return }
             Task { @MainActor in
-                self.pendingPermissionStore.add(event: event, connection: connection)
+                self.pendingPermissionStore.add(event: event, transport: transport)
             }
         }
 
@@ -175,6 +182,8 @@ final class AppStore {
         // Wire hotkey manager — session switcher open (double-tap Cmd)
         hotkeyManager.onSessionSwitcherOpen = { [weak self] in
             guard let self else { return }
+            // Don't open session switcher if expanded permission panel has focus
+            if self.hotkeyManager.isExpandedPermissionActive { return }
             let active = self.sessionStore.activeSessions
             self.sessionSwitcherStore.open(sessions: active)
             self.syncActiveCard()
@@ -210,6 +219,13 @@ final class AppStore {
                 } else {
                     self.hotkeyManager.selectedButtonIndex = index
                 }
+            case .expandedPermission:
+                // Route through same mechanism - PermissionContentView observes selectedButtonIndex
+                if self.hotkeyManager.selectedButtonIndex == index {
+                    self.hotkeyManager.selectedButtonIndex = nil
+                } else {
+                    self.hotkeyManager.selectedButtonIndex = index
+                }
             case .toast, .none:
                 break
             }
@@ -227,6 +243,8 @@ final class AppStore {
                 self.onSessionSwitcherDismiss?()
             case .permission:
                 self.hotkeyManager.confirmTrigger += 1
+            case .expandedPermission:
+                self.hotkeyManager.confirmTrigger += 1
             case .toast:
                 self.sessionFinishedStore.dismiss()
             case .none:
@@ -242,6 +260,8 @@ final class AppStore {
                 self.sessionSwitcherStore.close()
                 self.syncActiveCard()
                 self.onSessionSwitcherDismiss?()
+            case .expandedPermission:
+                self.onExpandPermission?() // Toggle close
             case .permission:
                 let reversed = Array(self.pendingPermissionStore.pending.reversed())
                 guard let topPerm = reversed.first(where: { !self.pendingPermissionStore.collapsed.contains($0.id) }) else { return }
@@ -254,14 +274,23 @@ final class AppStore {
         }
 
         // Wire hotkey manager — ⌘L toggles collapse: collapse topmost, or expand if all collapsed
+        // If expanded panel is open, close it and collapse the permission
         hotkeyManager.onCollapsePermission = { [weak self] in
             guard let self else { return }
+            if self.hotkeyManager.isExpandedPermissionActive {
+                self.onExpandPermission?() // Close expanded panel
+            }
             let reversed = Array(self.pendingPermissionStore.pending.reversed())
             if let topNonCollapsed = reversed.first(where: { !self.pendingPermissionStore.collapsed.contains($0.id) }) {
                 self.pendingPermissionStore.collapse(id: topNonCollapsed.id)
             } else if let topCollapsed = reversed.first {
                 self.pendingPermissionStore.expand(id: topCollapsed.id)
             }
+        }
+
+        // Wire hotkey manager — ⌘P expands topmost permission to fullscreen
+        hotkeyManager.onExpandPermission = { [weak self] in
+            self?.onExpandPermission?()
         }
 
         // Wire hotkey manager — toggle focus via configurable shortcut (⌘M)
@@ -303,6 +332,8 @@ final class AppStore {
     /// Recompute which overlay card has priority and sync to the hotkey shared state.
     /// Call whenever any card's visibility changes.
     func syncActiveCard() {
+        // Don't overwrite expanded permission state - only dismiss controls it
+        if hotkeyManager.activeCard == .expandedPermission { return }
         if sessionSwitcherStore.isActive {
             hotkeyManager.activeCard = .sessionSwitcher
         } else if !pendingPermissionStore.pending.isEmpty {
@@ -318,11 +349,7 @@ final class AppStore {
     func start() async {
         guard !isRunning else { return }
         isRunning = true
-        do {
-            try HookInstaller.install()
-        } catch {
-            print("[masko-desktop] Failed to install hooks: \(error)")
-        }
+        eventBus.installAll()
 
         // Evict cached videos older than 30 days
         VideoCache.shared.evictStaleFiles()
@@ -339,11 +366,7 @@ final class AppStore {
             }
         }
 
-        do {
-            try localServer.start()
-        } catch {
-            print("[masko-desktop] Failed to start local server: \(error)")
-        }
+        eventBus.startAll()
 
         // Reconcile sessions when app comes to foreground (crash recovery).
         // Throttled to at most once per 30 seconds — this notification fires on every
@@ -381,9 +404,9 @@ final class AppStore {
         isReady = true
     }
 
-    /// Tear down server and timers to prevent zombie processes
+    /// Tear down adapters and timers to prevent zombie processes
     func stop() {
-        localServer.stop()
+        eventBus.stopAll()
         sessionStore.stopTimers()
         pendingPermissionStore.stopTimers()
         hotkeyManager.stop()

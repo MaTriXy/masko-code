@@ -19,7 +19,7 @@ final class EventProcessor {
         self.notificationService = notificationService
     }
 
-    @MainActor func process(_ event: ClaudeEvent) async {
+    @MainActor func process(_ event: AgentEvent) async {
         eventStore.append(event)
         sessionStore.recordEvent(event)
 
@@ -29,7 +29,7 @@ final class EventProcessor {
         }
     }
 
-    private func createNotification(from event: ClaudeEvent) -> AppNotification? {
+    private func createNotification(from event: AgentEvent) -> AppNotification? {
         guard let eventType = event.eventType else { return nil }
 
         switch eventType {

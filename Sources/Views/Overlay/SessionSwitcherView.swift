@@ -53,7 +53,7 @@ struct SessionSwitcherView: View {
 }
 
 private struct SessionSwitcherRow: View {
-    let session: ClaudeSession
+    let session: AgentSession
     let index: Int
     let isSelected: Bool
     let showShortcuts: Bool

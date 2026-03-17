@@ -67,7 +67,7 @@ struct ActivityFeedView: View {
         .navigationTitle("Activity Feed")
     }
 
-    var filteredEvents: [ClaudeEvent] {
+    var filteredEvents: [AgentEvent] {
         appStore.eventStore.events
             .filter { event in
                 if let filterType { return event.eventType == filterType }
@@ -83,7 +83,7 @@ struct ActivityFeedView: View {
 }
 
 struct EventRow: View {
-    let event: ClaudeEvent
+    let event: AgentEvent
 
     var body: some View {
         HStack(spacing: 12) {

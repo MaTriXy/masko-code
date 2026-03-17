@@ -40,6 +40,9 @@ final class OverlayManager {
     // Context menu panel
     private var contextPanel: ContextMenuPanel?
 
+    // Expanded permission panel (fullscreen-style, triggered by Cmd+P)
+    private var expandedPanel: NSPanel?
+
     // Auto-hide when no Claude Code sessions are active
     private(set) var isAutoHideEnabled: Bool = UserDefaults.standard.object(forKey: "auto_hide_no_sessions") != nil
         ? UserDefaults.standard.bool(forKey: "auto_hide_no_sessions")
@@ -270,6 +273,7 @@ final class OverlayManager {
         pendingPermissionStore.onPendingChange = { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self?.scheduleHUDReposition()
+                self?.dismissExpandedPermission()
             }
         }
 
@@ -328,11 +332,11 @@ final class OverlayManager {
         let isCompacting = active.contains { $0.isCompacting }
         let sessionCount = active.count
 
-        sm.setInput("claudeCode::isWorking", .bool(isWorking))
-        sm.setInput("claudeCode::isIdle", .bool(isIdle))
-        sm.setInput("claudeCode::isAlert", .bool(isAlert))
-        sm.setInput("claudeCode::isCompacting", .bool(isCompacting))
-        sm.setInput("claudeCode::sessionCount", .number(Double(sessionCount)))
+        sm.setAgentStateInput("isWorking", .bool(isWorking))
+        sm.setAgentStateInput("isIdle", .bool(isIdle))
+        sm.setAgentStateInput("isAlert", .bool(isAlert))
+        sm.setAgentStateInput("isCompacting", .bool(isCompacting))
+        sm.setAgentStateInput("sessionCount", .number(Double(sessionCount)))
     }
 
     // MARK: - Auto-Hide (no active sessions)
@@ -436,13 +440,12 @@ final class OverlayManager {
 
     /// Compute aggregate session state and push inputs to the state machine.
     /// Called after SessionStore.recordEvent() has already updated session phases.
-    func handleEvent(_ event: ClaudeEvent) {
+    func handleEvent(_ event: AgentEvent) {
         refreshInputs()
 
         // Fire granular event trigger (auto-resets after transition)
         guard let sm = currentStateMachine else { return }
-        let eventInput = "claudeCode::\(event.hookEventName)"
-        sm.setInput(eventInput, .bool(true))
+        sm.setAgentEventTrigger(event.hookEventName)
     }
 
     /// Temporarily hide the overlay and restore it after the given duration.
@@ -893,6 +896,92 @@ final class OverlayManager {
         permissionPanel = nil
         statsPanel?.close()
         statsPanel = nil
+    }
+
+    // MARK: - Expanded Permission (Cmd+P fullscreen)
+
+    /// Whether the expanded permission panel is currently showing.
+    var isExpandedPermissionActive: Bool { expandedPanel != nil }
+
+    /// Show the topmost pending permission in a large centered panel.
+    /// Toggles: if already showing, dismiss it.
+    func showExpandedPermission() {
+        if expandedPanel != nil {
+            dismissExpandedPermission()
+            return
+        }
+
+        // Find the topmost non-collapsed permission
+        let nonCollapsed = pendingPermissionStore.pending.filter {
+            !pendingPermissionStore.collapsed.contains($0.id)
+        }
+        guard let permission = nonCollapsed.first else { return }
+
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let width = min(screen.width * 0.7, 800)
+        let height = min(screen.height * 0.75, 600)
+        let rect = NSRect(
+            x: screen.midX - width / 2,
+            y: screen.midY - height / 2,
+            width: width,
+            height: height
+        )
+
+        // Use OverlayPanel so it stays on top across spaces, like the mascot
+        let newPanel = OverlayPanel(contentRect: rect)
+        newPanel.isMovableByWindowBackground = true
+
+        let permissionId = permission.id
+        let view = PermissionContentView(
+            permission: permission,
+            mode: .expanded,
+            onDecision: { [weak self] decision in
+                self?.pendingPermissionStore.resolve(id: permissionId, decision: decision)
+            },
+            onAnswers: { [weak self] answers in
+                self?.pendingPermissionStore.resolveWithAnswers(id: permissionId, answers: answers)
+            },
+            onFeedback: { [weak self] feedback in
+                self?.pendingPermissionStore.resolveWithFeedback(id: permissionId, feedback: feedback)
+            },
+            onAllowWithPermissions: { [weak self] suggestions in
+                self?.pendingPermissionStore.resolveWithPermissions(id: permissionId, suggestions: suggestions)
+            },
+            onLater: { [weak self] in
+                self?.dismissExpandedPermission()
+                self?.pendingPermissionStore.collapse(id: permissionId)
+            },
+            onToggleMode: { [weak self] in
+                self?.dismissExpandedPermission()
+            }
+        )
+        .environment(pendingPermissionStore)
+        .environment(sessionStore)
+        .environment(hotkeyManager)
+
+        let controller = TransparentHostingController(rootView: view)
+        newPanel.contentView = controller.view
+        newPanel.contentViewController = controller
+
+        newPanel.orderFrontRegardless()
+        SkyLightOperator.shared.delegateWindow(newPanel)
+
+        // Set active card to expanded so shortcuts target the expanded panel, not the small bubble
+        hotkeyManager.activeCard = .expandedPermission
+
+        self.expandedPanel = newPanel
+        print("[masko-desktop] Expanded permission panel shown")
+    }
+
+    func dismissExpandedPermission() {
+        expandedPanel?.close()
+        expandedPanel = nil
+        // Restore active card to permission so shortcuts target the small bubble again
+        if !pendingPermissionStore.pending.isEmpty {
+            hotkeyManager.activeCard = .permission
+        } else {
+            hotkeyManager.activeCard = .none
+        }
     }
 
     // MARK: - Session Switcher (rendered inside permission panel)

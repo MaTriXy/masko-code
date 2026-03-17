@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 // MARK: - Permission suggestion model (matches Claude Code protocol)
 
@@ -68,8 +67,8 @@ struct ParsedOption {
 
 struct PendingPermission: Identifiable {
     let id: UUID
-    let event: ClaudeEvent
-    let connection: NWConnection
+    let event: AgentEvent
+    let transport: ResponseTransport
     let receivedAt: Date
     /// tool_use_id correlated from the preceding PreToolUse event
     /// (PermissionRequest events from Claude Code don't include tool_use_id)
@@ -344,8 +343,17 @@ final class PendingPermissionStore {
     private(set) var pending: [PendingPermission] = []
     /// Permissions the user chose to defer ("Later") — hidden from overlay but connection stays open
     private(set) var collapsed: Set<UUID> = []
+    /// Shared interaction state per permission — survives expand/collapse transitions
+    private var interactionStates: [UUID: PermissionInteractionState] = [:]
+
+    func interactionState(for id: UUID) -> PermissionInteractionState {
+        if let existing = interactionStates[id] { return existing }
+        let state = PermissionInteractionState()
+        interactionStates[id] = state
+        return state
+    }
     /// Called when a permission is resolved — used to update notification outcome
-    var onResolved: ((ClaudeEvent, ResolutionOutcome) -> Void)?
+    var onResolved: ((AgentEvent, ResolutionOutcome) -> Void)?
     /// Called when pending permissions change — used to resize/reposition the overlay panel
     var onPendingChange: (() -> Void)?
     /// Secondary callback for pending changes — used by hotkey manager (avoids overwriting primary)
@@ -370,7 +378,7 @@ final class PendingPermissionStore {
         preToolUseCache[key] = toolUseId
     }
 
-    func add(event: ClaudeEvent, connection: NWConnection) {
+    func add(event: AgentEvent, transport: ResponseTransport) {
         // Correlate with preceding PreToolUse to recover tool_use_id
         // (PermissionRequest events from Claude Code don't include tool_use_id)
         var resolvedToolUseId = event.toolUseId
@@ -382,7 +390,7 @@ final class PendingPermissionStore {
         let permission = PendingPermission(
             id: UUID(),
             event: event,
-            connection: connection,
+            transport: transport,
             receivedAt: Date(),
             resolvedToolUseId: resolvedToolUseId
         )
@@ -390,9 +398,11 @@ final class PendingPermissionStore {
         onPendingChange?()
         onPendingCountChange?()
 
-        // Monitor connection — if the hook script exits (user answered in terminal),
-        // the receive completes and we auto-dismiss without sending a response.
-        monitorConnection(connection, permissionId: permission.id)
+        // Monitor transport - if the agent answers from terminal,
+        // the transport closes and we auto-dismiss without sending a response.
+        transport.onRemoteClose { [weak self] in
+            self?.silentRemove(id: permission.id)
+        }
 
         print("[masko-desktop] Permission added: \(event.toolName ?? "unknown") toolUseId=\(resolvedToolUseId ?? "nil") (pending: \(pending.count))")
     }
@@ -405,30 +415,7 @@ final class PendingPermissionStore {
         collapsed.remove(id)
     }
 
-    /// Watch for remote TCP close via both receive() and state handler.
-    /// Covers all disconnect scenarios: clean close, SIGKILL, broken pipe.
-    private func monitorConnection(_ connection: NWConnection, permissionId id: UUID) {
-        // State handler catches cancelled/failed connections that receive() might miss
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .cancelled, .failed:
-                DispatchQueue.main.async { self?.silentRemove(id: id) }
-            default:
-                break
-            }
-        }
-
-        // Receive-based monitoring catches clean TCP close
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, isComplete, error in
-            if isComplete || error != nil {
-                DispatchQueue.main.async { self?.silentRemove(id: id) }
-            } else {
-                self?.monitorConnection(connection, permissionId: id)
-            }
-        }
-    }
-
-    /// Periodically check for stale permissions whose connections died silently
+    /// Periodically check for stale permissions whose transports died silently
     private var livenessTimer: Timer?
 
     func startLivenessChecks() {
@@ -437,13 +424,12 @@ final class PendingPermissionStore {
         }
     }
 
-    /// Invalidate timers and cancel all open connections — called on app termination
+    /// Invalidate timers and cancel all open transports - called on app termination
     func stopTimers() {
         livenessTimer?.invalidate()
         livenessTimer = nil
-        // Cancel all held NWConnections so they don't linger
         for perm in pending {
-            perm.connection.cancel()
+            perm.transport.cancel()
         }
         pending.removeAll()
     }
@@ -454,12 +440,7 @@ final class PendingPermissionStore {
 
     private func checkConnectionLiveness() {
         let staleIds = pending.compactMap { perm -> UUID? in
-            switch perm.connection.state {
-            case .cancelled, .failed:
-                return perm.id
-            default:
-                return nil
-            }
+            perm.transport.isAlive ? nil : perm.id
         }
         for id in staleIds {
             silentRemove(id: id)
@@ -504,6 +485,7 @@ final class PendingPermissionStore {
         let permission = pending[index]
 
         collapsed.remove(id)
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -517,13 +499,9 @@ final class PendingPermissionStore {
 
         collapsed.remove(id)
 
-        // Send HTTP response on the held connection
-        let (status, body, exitHint) = decision.httpResponse
-        let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\nX-Exit-Code: \(exitHint)\r\n\r\n\(body)"
-        permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-            permission.connection.cancel()
-        })
+        permission.transport.sendDecision(decision)
 
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -548,25 +526,9 @@ final class PendingPermissionStore {
         }
         updatedInput["answers"] = answers
 
-        // Build response JSON
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedInput": updatedInput
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedInput(updatedInput)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -589,24 +551,9 @@ final class PendingPermissionStore {
         }
         updatedInput["userFeedback"] = feedback
 
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedInput": updatedInput
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedInput(updatedInput)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -622,24 +569,9 @@ final class PendingPermissionStore {
         collapsed.remove(id)
 
         let updatedPermissions: [[String: Any]] = suggestions.map { $0.toDict }
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedPermissions": updatedPermissions
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedPermissions(updatedPermissions)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            permission.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                permission.connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()

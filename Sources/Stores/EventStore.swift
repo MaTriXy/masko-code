@@ -2,14 +2,14 @@ import Foundation
 
 @Observable
 final class EventStore {
-    private(set) var events: [ClaudeEvent] = []
+    private(set) var events: [AgentEvent] = []
     private let maxEvents = 1000
     private static let filename = "events.json"
     private var persistTimer: Timer?
     private var isDirty = false
 
     init() {
-        events = LocalStorage.load([ClaudeEvent].self, from: Self.filename) ?? []
+        events = LocalStorage.load([AgentEvent].self, from: Self.filename) ?? []
     }
 
     /// Debounced persist — batches rapid writes (max once per 5 seconds)
@@ -28,7 +28,7 @@ final class EventStore {
         LocalStorage.save(events, to: Self.filename)
     }
 
-    func append(_ event: ClaudeEvent) {
+    func append(_ event: AgentEvent) {
         events.insert(event, at: 0)
         if events.count > maxEvents {
             events.removeLast(events.count - maxEvents)
@@ -44,11 +44,11 @@ final class EventStore {
         LocalStorage.save(events, to: Self.filename)
     }
 
-    func events(for sessionId: String) -> [ClaudeEvent] {
+    func events(for sessionId: String) -> [AgentEvent] {
         events.filter { $0.sessionId == sessionId }
     }
 
-    func events(ofType type: HookEventType) -> [ClaudeEvent] {
+    func events(ofType type: HookEventType) -> [AgentEvent] {
         events.filter { $0.eventType == type }
     }
 }

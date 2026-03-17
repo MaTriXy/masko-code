@@ -73,6 +73,17 @@ final class OverlayStateMachine {
         initializeInputs()
     }
 
+    /// Agent state input names (generic prefix).
+    /// Old mascot JSONs use "claudeCode::" - both prefixes are kept in sync.
+    static let agentPrefix = "agent::"
+    /// Legacy prefix for backward compatibility with existing mascot JSON files
+    static let legacyPrefix = "claudeCode::"
+
+    /// The 5 persistent agent state inputs (not auto-reset triggers)
+    private static let agentStateInputs: Set<String> = [
+        "isWorking", "isIdle", "isAlert", "isCompacting", "sessionCount",
+    ]
+
     private func initializeInputs() {
         // Node-local inputs (reset on arrival)
         inputs["clicked"] = .bool(false)
@@ -80,12 +91,12 @@ final class OverlayStateMachine {
         inputs["loopCount"] = .number(0)
         inputs["nodeTime"] = .number(0)
 
-        // Session state inputs (set by OverlayManager bridge)
-        inputs["claudeCode::isWorking"] = .bool(false)
-        inputs["claudeCode::isIdle"] = .bool(true)
-        inputs["claudeCode::isAlert"] = .bool(false)
-        inputs["claudeCode::isCompacting"] = .bool(false)
-        inputs["claudeCode::sessionCount"] = .number(0)
+        // Agent state inputs - set both "agent::" and "claudeCode::" so old JSONs work
+        setAgentStateInput("isWorking", .bool(false))
+        setAgentStateInput("isIdle", .bool(true))
+        setAgentStateInput("isAlert", .bool(false))
+        setAgentStateInput("isCompacting", .bool(false))
+        setAgentStateInput("sessionCount", .number(0))
 
         // Custom inputs from config
         if let configInputs = config.inputs {
@@ -93,6 +104,20 @@ final class OverlayStateMachine {
                 inputs[input.name] = input.defaultValue
             }
         }
+    }
+
+    /// Set an agent state input under both "agent::" and "claudeCode::" prefixes.
+    /// This ensures old mascot JSONs referencing "claudeCode::isWorking" keep working.
+    func setAgentStateInput(_ name: String, _ value: ConditionValue) {
+        inputs[Self.agentPrefix + name] = value
+        inputs[Self.legacyPrefix + name] = value
+    }
+
+    /// Set an agent event trigger under both prefixes.
+    func setAgentEventTrigger(_ eventName: String) {
+        setInput(Self.agentPrefix + eventName, .bool(true))
+        // Also set legacy prefix so old JSONs with "claudeCode::PreToolUse" conditions work
+        inputs[Self.legacyPrefix + eventName] = .bool(true)
     }
 
     // MARK: - Public API
@@ -232,9 +257,18 @@ final class OverlayStateMachine {
         if name == "clicked" {
             inputs["clicked"] = .bool(false)
         }
-        // Claude Code event triggers (claudeCode::*) always reset
-        if name.hasPrefix("claudeCode::") && name != "claudeCode::isWorking" && name != "claudeCode::isIdle" && name != "claudeCode::isAlert" && name != "claudeCode::isCompacting" && name != "claudeCode::sessionCount" {
-            inputs[name] = .bool(false)
+        // Agent event triggers (agent::* and claudeCode::*) always reset,
+        // but persistent state inputs (isWorking, isIdle, etc.) do not.
+        for prefix in [Self.agentPrefix, Self.legacyPrefix] {
+            if name.hasPrefix(prefix) {
+                let suffix = String(name.dropFirst(prefix.count))
+                if !Self.agentStateInputs.contains(suffix) {
+                    // Reset both prefixes for this trigger
+                    inputs[Self.agentPrefix + suffix] = .bool(false)
+                    inputs[Self.legacyPrefix + suffix] = .bool(false)
+                }
+                break
+            }
         }
         // Custom trigger-type inputs reset after firing
         if let configInputs = config.inputs,
