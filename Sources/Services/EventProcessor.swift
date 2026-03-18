@@ -19,7 +19,7 @@ final class EventProcessor {
         self.notificationService = notificationService
     }
 
-    @MainActor func process(_ event: ClaudeEvent) async {
+    @MainActor func process(_ event: AgentEvent) async {
         eventStore.append(event)
         sessionStore.recordEvent(event)
 
@@ -29,7 +29,7 @@ final class EventProcessor {
         }
     }
 
-    private func createNotification(from event: ClaudeEvent) -> AppNotification? {
+    private func createNotification(from event: AgentEvent) -> AppNotification? {
         guard let eventType = event.eventType else { return nil }
 
         switch eventType {
@@ -73,9 +73,7 @@ final class EventProcessor {
                let qDict = (firstQ as? [String: Any]) ?? (firstQ as? [String: AnyCodable])?.mapValues(\.value),
                let questionText = qDict["question"] as? String {
                 body = questionText
-            } else if event.assistantClientKind != .claude,
-                      let message = event.message,
-                      !message.isEmpty {
+            } else if let message = event.message, !message.isEmpty {
                 body = message
             } else {
                 body = "\(event.assistantDisplayName) wants to use \(event.toolName ?? "a tool") in \(event.projectName ?? "a project")"
@@ -89,9 +87,6 @@ final class EventProcessor {
             )
 
         case .stop:
-            if event.isLikelyCodexQuestionPrompt {
-                return nil
-            }
             return AppNotification(
                 title: "Task Completed",
                 body: truncate(event.lastAssistantMessage, maxLength: 100)
@@ -111,10 +106,6 @@ final class EventProcessor {
             )
 
         case .taskCompleted:
-            if event.assistantClientKind != .claude,
-               ClaudeEvent.looksLikeQuestionPrompt(event.taskSubject) {
-                return nil
-            }
             return AppNotification(
                 title: "Task Completed",
                 body: event.taskSubject ?? "A task was completed",

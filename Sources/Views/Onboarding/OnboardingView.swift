@@ -17,7 +17,7 @@ struct OnboardingView: View {
     @State private var selectedPresetSlug: String? = nil
     @State private var isLoadingPreset = false
 
-    private let totalSteps = 6
+    private let totalSteps = 7
 
     /// Advance to the next step that actually needs user action, skipping already-completed ones.
     private func nextStep(after current: Int) {
@@ -44,6 +44,7 @@ struct OnboardingView: View {
                 case 3: accessibilityStep
                 case 4: ideIntegrationStep
                 case 5: mascotStep
+                case 6: githubStarStep
                 default: EmptyView()
                 }
             }
@@ -197,13 +198,26 @@ struct OnboardingView: View {
                     .font(Constants.heading(size: 24, weight: .bold))
                     .foregroundStyle(Constants.textPrimary)
 
-                Text("Accept permissions with \u{2318}1, toggle focus with \u{2318}\u{21E7}M \u{2014} without switching windows.")
+                Text("Accept permissions with \u{2318}1, toggle focus with a global shortcut - without switching windows.")
                     .font(Constants.body(size: 14))
                     .foregroundStyle(Constants.textMuted)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
             }
+
+            // Focus Toggle shortcut picker
+            HStack(spacing: 10) {
+                Text("Focus Toggle")
+                    .font(Constants.body(size: 13, weight: .medium))
+                    .foregroundStyle(Constants.textPrimary)
+
+                ShortcutRecorderView(hotkeyManager: appStore.hotkeyManager)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Constants.textMuted.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
 
             if accessibilityGranted {
                 HStack(spacing: 6) {
@@ -331,8 +345,8 @@ struct OnboardingView: View {
                         .foregroundStyle(.green)
                 }
 
-                primaryButton("Let's go!") {
-                    onComplete()
+                primaryButton("Continue") {
+                    nextStep(after: 5)
                 }
             } else {
                 primaryButton(isLoadingPreset ? "Loading..." : "Activate Mascot") {
@@ -341,8 +355,42 @@ struct OnboardingView: View {
                 .opacity(selectedPresetSlug == nil ? 0.5 : 1)
                 .allowsHitTesting(selectedPresetSlug != nil && !isLoadingPreset)
 
-                skipButton { onComplete() }
+                skipButton { nextStep(after: 5) }
             }
+        }
+    }
+
+    // MARK: - Step 6: Star on GitHub
+
+    private var githubStarStep: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "star.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.yellow)
+
+            VStack(spacing: 8) {
+                Text("You're all set!")
+                    .font(Constants.heading(size: 24, weight: .bold))
+                    .foregroundStyle(Constants.textPrimary)
+
+                Text("Masko Code is free and open source.\nIf you like it, a GitHub star helps us grow!")
+                    .font(Constants.body(size: 14))
+                    .foregroundStyle(Constants.textMuted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+            }
+
+            primaryButton("Star on GitHub") {
+                if let url = URL(string: Constants.githubRepoURL) {
+                    NSWorkspace.shared.open(url)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    onComplete()
+                }
+            }
+
+            skipButton { onComplete() }
         }
     }
 

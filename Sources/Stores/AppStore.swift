@@ -8,8 +8,10 @@ final class AppStore {
         let text: String
     }
 
-    let localServer = LocalServer()
-    let codexSessionMonitor = CodexSessionMonitor()
+    let eventBus = MaskoEventBus()
+    let claudeCodeAdapter = ClaudeCodeAdapter()
+    let copilotAdapter = CopilotAdapter()
+    let codexAdapter = CodexAdapter()
     let eventStore = EventStore()
     let sessionStore = SessionStore()
     let notificationStore = NotificationStore()
@@ -25,14 +27,24 @@ final class AppStore {
     private(set) var isRunning = false
     private var lastReconcileDate: Date = .distantPast
 
-    /// Called when a Claude Code event is received — wire to OverlayManager.handleEvent
-    var onEventForOverlay: ((ClaudeEvent) -> Void)?
+    /// Cached IDE detection results — survives across SettingsView recreations.
+    /// Updated by SettingsView.task and install/uninstall actions.
+    var cachedIDEStatuses: [ExtensionInstaller.IDEStatus] = []
+
+    /// Convenience access to the Claude Code local server for UI status indicators
+    var localServer: LocalServer { claudeCodeAdapter.localServer }
+
+    /// Called when an agent event is received - wire to OverlayManager.handleEvent
+    var onEventForOverlay: ((AgentEvent) -> Void)?
     /// Called when a custom input is received via POST /input
     var onInputForOverlay: ((String, ConditionValue) -> Void)?
     /// Called when session phases change outside of events (e.g. interrupt detection via transcript)
     var onRefreshOverlay: (() -> Void)?
     /// Called when the session-finished toast appears/dismisses — trigger panel reposition
     var onToastChanged: (() -> Void)?
+
+    /// Expanded permission panel callback — wire to OverlayManager
+    var onExpandPermission: (() -> Void)?
 
     /// Session switcher overlay callbacks — wire to OverlayManager
     var onSessionSwitcherShow: (() -> Void)?
@@ -64,64 +76,12 @@ final class AppStore {
         )
     }
 
-    static func shouldDismissPendingPermissions(
-        for event: ClaudeEvent,
-        hasPendingAskUserQuestionPermission: Bool = false
-    ) -> Bool {
-        switch event.eventType {
-        case .userPromptSubmit:
-            return true
-        case .stop:
-            // Codex question turns can emit a stop marker after asking the user.
-            // Keep AskUserQuestion cards open until the user resolves them.
-            if event.assistantClientKind != .claude, hasPendingAskUserQuestionPermission {
-                return false
-            }
-            return !event.isLikelyCodexQuestionPrompt
-        default:
-            return false
-        }
-    }
-
-    static func shouldDismissByToolUseCompletion(
-        for event: ClaudeEvent,
-        hasMatchingAskUserQuestionPermission: Bool
-    ) -> Bool {
-        guard [.postToolUse, .postToolUseFailure].contains(event.eventType) else {
-            return false
-        }
-
-        guard event.assistantClientKind != .claude else {
-            return true
-        }
-
-        // Codex request_user_input completions can appear before the user answers.
-        // Do not auto-dismiss the mirrored AskUserQuestion card in that case.
-        if hasMatchingAskUserQuestionPermission {
-            return false
-        }
-        if event.toolName == "request_user_input" || event.toolName == "AskUserQuestion" {
-            return false
-        }
-        return true
-    }
-
-    static func shouldShowSessionFinishedToast(for event: ClaudeEvent, hasPendingPermissions: Bool) -> Bool {
-        guard event.eventType == .stop,
-              event.reason != "interrupted",
-              !hasPendingPermissions,
-              !event.isLikelyCodexQuestionPrompt else {
-            return false
-        }
-        return true
-    }
-
     var hasUnreadNotifications: Bool { notificationStore.unreadCount > 0 }
     var assistantEventIngestionStatus: AssistantEventIngestionStatus {
         Self.assistantEventIngestionStatus(
             localServerRunning: localServer.isRunning,
             localServerPort: localServer.port,
-            codexMonitorRunning: codexSessionMonitor.isRunning
+            codexMonitorRunning: codexAdapter.isRunning
         )
     }
     var isAssistantEventIngestionActive: Bool { assistantEventIngestionStatus.isActive }
@@ -139,35 +99,80 @@ final class AppStore {
             notificationService: notificationService
         )
 
-        // Wire local server → event processor + overlay state machine
-        localServer.onEventReceived = { [weak self] event in
+        // Register adapters with the event bus
+        eventBus.register(claudeCodeAdapter)
+        eventBus.register(copilotAdapter)
+        eventBus.register(codexAdapter)
+
+        // Wire event bus -> event processor + overlay state machine
+        eventBus.onEvent = { [weak self] event in
             guard let self else { return }
             Task { @MainActor in
-                await self.handleIncomingEvent(event)
+                await self.eventProcessor.process(event)
+
+                // If a subsequent event arrives for a session with pending permissions,
+                // the user may have resolved a permission from the terminal - dismiss it.
+                // For postToolUse/postToolUseFailure: only dismiss the SPECIFIC tool use
+                // that completed (by toolUseId), not all permissions for the agent.
+                // For stop/userPromptSubmit: session is ending, dismiss all for that agent.
+                if let eventType = event.eventType,
+                   let sid = event.sessionId {
+                    // Cache PreToolUse toolUseId - fires immediately before PermissionRequest
+                    // for the same tool call, and carries the tool_use_id that PermissionRequest lacks.
+                    if eventType == .preToolUse,
+                       let toolUseId = event.toolUseId,
+                       let toolName = event.toolName {
+                        self.pendingPermissionStore.cachePreToolUse(
+                            sessionId: sid, agentId: event.agentId,
+                            toolName: toolName, toolUseId: toolUseId
+                        )
+                    }
+
+                    if [.stop, .userPromptSubmit].contains(eventType),
+                       self.pendingPermissionStore.pending.contains(where: {
+                           $0.event.sessionId == sid && $0.event.agentId == event.agentId
+                       }) {
+                        self.pendingPermissionStore.dismissForAgent(sessionId: sid, agentId: event.agentId)
+                    } else if [.postToolUse, .postToolUseFailure].contains(eventType),
+                              let toolUseId = event.toolUseId {
+                        self.pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
+                    }
+                }
+
+                // Show "task completed" toast when agent finishes (skip interrupts)
+                if event.eventType == .stop,
+                   event.reason != "interrupted",
+                   !self.pendingPermissionStore.pending.contains(where: { $0.event.sessionId == event.sessionId }) {
+                    self.sessionFinishedStore.show(
+                        sessionId: event.sessionId ?? "",
+                        projectName: event.projectName ?? "Project"
+                    )
+                    self.syncActiveCard()
+                    self.onToastChanged?()
+                }
+
+                // Dismiss toast when user starts typing (already back in the loop)
+                if event.eventType == .userPromptSubmit {
+                    self.sessionFinishedStore.dismiss()
+                }
+
+                self.onEventForOverlay?(event)
             }
         }
 
-        // Wire Codex session logs → shared event pipeline
-        codexSessionMonitor.onEventReceived = { [weak self] event in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.handleIncomingEvent(event)
-            }
-        }
-
-        // Wire local server → custom input endpoint
-        localServer.onInputReceived = { [weak self] name, value in
+        // Wire event bus -> custom input endpoint
+        eventBus.onInput = { [weak self] name, value in
             guard let self else { return }
             Task { @MainActor in
                 self.onInputForOverlay?(name, value)
             }
         }
 
-        // Wire local server → permission requests (hold connection for user decision)
-        localServer.onPermissionRequest = { [weak self] event, connection in
+        // Wire event bus -> permission requests (with transport for responding)
+        eventBus.onPermissionRequest = { [weak self] event, transport in
             guard let self else { return }
             Task { @MainActor in
-                self.pendingPermissionStore.add(event: event, connection: connection)
+                self.pendingPermissionStore.add(event: event, transport: transport)
             }
         }
 
@@ -217,6 +222,8 @@ final class AppStore {
         // Wire hotkey manager — session switcher open (double-tap Cmd)
         hotkeyManager.onSessionSwitcherOpen = { [weak self] in
             guard let self else { return }
+            // Don't open session switcher if expanded permission panel has focus
+            if self.hotkeyManager.isExpandedPermissionActive { return }
             let active = self.sessionStore.activeSessions
             self.sessionSwitcherStore.open(sessions: active)
             self.syncActiveCard()
@@ -252,6 +259,13 @@ final class AppStore {
                 } else {
                     self.hotkeyManager.selectedButtonIndex = index
                 }
+            case .expandedPermission:
+                // Route through same mechanism - PermissionContentView observes selectedButtonIndex
+                if self.hotkeyManager.selectedButtonIndex == index {
+                    self.hotkeyManager.selectedButtonIndex = nil
+                } else {
+                    self.hotkeyManager.selectedButtonIndex = index
+                }
             case .toast, .none:
                 break
             }
@@ -269,6 +283,8 @@ final class AppStore {
                 self.onSessionSwitcherDismiss?()
             case .permission:
                 self.hotkeyManager.confirmTrigger += 1
+            case .expandedPermission:
+                self.hotkeyManager.confirmTrigger += 1
             case .toast:
                 self.sessionFinishedStore.dismiss()
             case .none:
@@ -284,6 +300,8 @@ final class AppStore {
                 self.sessionSwitcherStore.close()
                 self.syncActiveCard()
                 self.onSessionSwitcherDismiss?()
+            case .expandedPermission:
+                self.onExpandPermission?() // Toggle close
             case .permission:
                 let reversed = Array(self.pendingPermissionStore.pending.reversed())
                 guard let topPerm = reversed.first(where: { !self.pendingPermissionStore.collapsed.contains($0.id) }) else { return }
@@ -296,14 +314,23 @@ final class AppStore {
         }
 
         // Wire hotkey manager — ⌘L toggles collapse: collapse topmost, or expand if all collapsed
+        // If expanded panel is open, close it and collapse the permission
         hotkeyManager.onCollapsePermission = { [weak self] in
             guard let self else { return }
+            if self.hotkeyManager.isExpandedPermissionActive {
+                self.onExpandPermission?() // Close expanded panel
+            }
             let reversed = Array(self.pendingPermissionStore.pending.reversed())
             if let topNonCollapsed = reversed.first(where: { !self.pendingPermissionStore.collapsed.contains($0.id) }) {
                 self.pendingPermissionStore.collapse(id: topNonCollapsed.id)
             } else if let topCollapsed = reversed.first {
                 self.pendingPermissionStore.expand(id: topCollapsed.id)
             }
+        }
+
+        // Wire hotkey manager — ⌘P expands topmost permission to fullscreen
+        hotkeyManager.onExpandPermission = { [weak self] in
+            self?.onExpandPermission?()
         }
 
         // Wire hotkey manager — toggle focus via configurable shortcut (⌘M)
@@ -313,12 +340,6 @@ final class AppStore {
             let reversed = Array(self.pendingPermissionStore.pending.reversed())
             if let topPerm = reversed.first {
                 let sessionDir = self.sessionStore.sessions.first(where: { $0.id == topPerm.event.sessionId })?.projectDir
-                if topPerm.event.assistantClientKind != .claude,
-                   topPerm.event.terminalPid == nil,
-                   topPerm.event.shellPid == nil,
-                   CodexInteractiveBridge.focus(event: topPerm.event) {
-                    return
-                }
                 IDETerminalFocus.focus(
                     terminalPid: topPerm.event.terminalPid,
                     shellPid: topPerm.event.shellPid,
@@ -328,9 +349,7 @@ final class AppStore {
                       let session = self.sessionStore.sessions.first(where: { $0.id == toast.sessionId }) {
                 IDETerminalFocus.focusSession(session)
                 self.sessionFinishedStore.dismiss()
-            } else if let session = self.sessionStore.activeSessions.last(where: {
-                $0.terminalPid != nil || $0.shellPid != nil || ($0.assistantSource?.lowercased().contains("codex") == true)
-            }) {
+            } else if let session = self.sessionStore.sessions.last(where: { $0.terminalPid != nil }) {
                 IDETerminalFocus.focusSession(session)
             } else {
                 self.hotkeyManager.toggleFocus()
@@ -350,115 +369,11 @@ final class AppStore {
         }
     }
 
-    @MainActor
-    private func handleIncomingEvent(_ event: ClaudeEvent) async {
-        await eventProcessor.process(event)
-
-        // Codex permission requests are log-derived (no held hook connection).
-        // Queue them as local pending permissions so mascot approval UI can handle them.
-        if event.eventType == .permissionRequest,
-           event.assistantClientKind != .claude {
-            pendingPermissionStore.addLocal(event: event) { [weak self] resolution in
-                self?.handleLocalCodexPermissionResolution(event: event, resolution: resolution) ?? false
-            }
-        }
-
-        // If a subsequent event arrives for a session with pending permissions,
-        // the user may have resolved a permission from the terminal — dismiss it.
-        // For postToolUse/postToolUseFailure: only dismiss the SPECIFIC tool use
-        // that completed (by toolUseId), not all permissions for the agent.
-        // For stop/userPromptSubmit: session is ending, dismiss all for that agent.
-        if let eventType = event.eventType,
-           let sid = event.sessionId {
-            let hasPendingForAgent = pendingPermissionStore.pending.contains {
-                $0.event.sessionId == sid && $0.event.agentId == event.agentId
-            }
-            let hasPendingAskUserQuestionForAgent = pendingPermissionStore.pending.contains {
-                $0.event.sessionId == sid &&
-                    $0.event.agentId == event.agentId &&
-                    $0.event.toolName == "AskUserQuestion"
-            }
-
-            // Cache PreToolUse toolUseId — fires immediately before PermissionRequest
-            // for the same tool call, and carries the tool_use_id that PermissionRequest lacks.
-            if eventType == .preToolUse,
-               let toolUseId = event.toolUseId,
-               let toolName = event.toolName {
-                pendingPermissionStore.cachePreToolUse(
-                    sessionId: sid, agentId: event.agentId,
-                    toolName: toolName, toolUseId: toolUseId
-                )
-            }
-
-            if Self.shouldDismissPendingPermissions(
-                for: event,
-                hasPendingAskUserQuestionPermission: hasPendingAskUserQuestionForAgent
-            ), hasPendingForAgent {
-                pendingPermissionStore.dismissForAgent(sessionId: sid, agentId: event.agentId)
-            } else if [.postToolUse, .postToolUseFailure].contains(eventType),
-                      let toolUseId = event.toolUseId {
-                let hasMatchingAskUserQuestionPermission = pendingPermissionStore.pending.contains { permission in
-                    permission.event.sessionId == sid &&
-                        permission.event.toolName == "AskUserQuestion" &&
-                        (permission.event.toolUseId == toolUseId || permission.resolvedToolUseId == toolUseId)
-                }
-                if Self.shouldDismissByToolUseCompletion(
-                    for: event,
-                    hasMatchingAskUserQuestionPermission: hasMatchingAskUserQuestionPermission
-                ) {
-                    // Only dismiss the specific permission whose tool was just executed
-                    // (i.e. user answered from terminal, not from the overlay).
-                    pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
-                }
-            }
-        }
-
-        // Show "task completed" toast when assistant finishes (skip interrupts)
-        if Self.shouldShowSessionFinishedToast(
-            for: event,
-            hasPendingPermissions: pendingPermissionStore.pending.contains(where: { $0.event.sessionId == event.sessionId })
-        ) {
-            sessionFinishedStore.show(
-                sessionId: event.sessionId ?? "",
-                projectName: event.projectName ?? "Project"
-            )
-            syncActiveCard()
-            // Trigger overlay panel reposition after SwiftUI renders the toast
-            onToastChanged?()
-        }
-
-        // Dismiss toast when user starts typing (already back in the loop)
-        if event.eventType == .userPromptSubmit {
-            sessionFinishedStore.dismiss()
-        }
-
-        onEventForOverlay?(event)
-    }
-
-    private func handleLocalCodexPermissionResolution(event: ClaudeEvent, resolution: LocalPermissionResolution) -> Bool {
-        // Codex log ingestion currently has no supported background reply transport on macOS.
-        // Keep the prompt pending when a local response cannot be delivered.
-        if CodexInteractiveBridge.submit(resolution: resolution, event: event) {
-            return true
-        }
-
-        let session = event.sessionId ?? "unknown"
-        switch resolution {
-        case .decision(let decision):
-            print("[masko-desktop] Codex local permission unresolved \(decision.rawValue): \(event.toolName ?? "unknown") session=\(session)")
-        case .answers(let answers):
-            print("[masko-desktop] Codex local answers unresolved for session=\(session): \(answers.keys.sorted())")
-        case .feedback(let feedback):
-            print("[masko-desktop] Codex local feedback unresolved for session=\(session): \(feedback.prefix(80))")
-        case .permissionSuggestions(let suggestions):
-            print("[masko-desktop] Codex local permission suggestions unresolved for session=\(session): \(suggestions.count)")
-        }
-        return false
-    }
-
     /// Recompute which overlay card has priority and sync to the hotkey shared state.
     /// Call whenever any card's visibility changes.
     func syncActiveCard() {
+        // Don't overwrite expanded permission state - only dismiss controls it
+        if hotkeyManager.activeCard == .expandedPermission { return }
         if sessionSwitcherStore.isActive {
             hotkeyManager.activeCard = .sessionSwitcher
         } else if !pendingPermissionStore.pending.isEmpty {
@@ -474,11 +389,7 @@ final class AppStore {
     func start() async {
         guard !isRunning else { return }
         isRunning = true
-        do {
-            try HookInstaller.install()
-        } catch {
-            print("[masko-desktop] Failed to install hooks: \(error)")
-        }
+        eventBus.installAll()
 
         // Evict cached videos older than 30 days
         VideoCache.shared.evictStaleFiles()
@@ -495,12 +406,7 @@ final class AppStore {
             }
         }
 
-        do {
-            try localServer.start()
-        } catch {
-            print("[masko-desktop] Failed to start local server: \(error)")
-        }
-        codexSessionMonitor.start(bootstrapRecentFiles: sessionStore.activeSessions.isEmpty)
+        eventBus.startAll()
 
         // Reconcile sessions when app comes to foreground (crash recovery).
         // Throttled to at most once per 30 seconds — this notification fires on every
@@ -538,10 +444,9 @@ final class AppStore {
         isReady = true
     }
 
-    /// Tear down server and timers to prevent zombie processes
+    /// Tear down adapters and timers to prevent zombie processes
     func stop() {
-        localServer.stop()
-        codexSessionMonitor.stop()
+        eventBus.stopAll()
         sessionStore.stopTimers()
         pendingPermissionStore.stopTimers()
         hotkeyManager.stop()

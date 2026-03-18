@@ -6,21 +6,7 @@ import Foundation
 enum IDETerminalFocus {
 
     /// Focus the terminal for a given session.
-    static func focusSession(_ session: ClaudeSession) {
-        if session.terminalPid == nil,
-           session.shellPid == nil,
-           let source = session.assistantSource,
-           source.lowercased().contains("codex") {
-            let event = ClaudeEvent(
-                hookEventName: HookEventType.permissionRequest.rawValue,
-                sessionId: session.id,
-                cwd: session.projectDir,
-                source: source
-            )
-            if CodexInteractiveBridge.focus(event: event) {
-                return
-            }
-        }
+    static func focusSession(_ session: AgentSession) {
         focus(terminalPid: session.terminalPid, shellPid: session.shellPid, projectDir: session.projectDir)
     }
 
@@ -39,24 +25,58 @@ enum IDETerminalFocus {
         // Try IDE extension for exact terminal tab focus
         if let shellPid,
            let bundleId,
-           let scheme = ExtensionInstaller.uriScheme(forBundleId: bundleId),
            UserDefaults.standard.bool(forKey: "ideExtensionEnabled") {
-            // Bring correct window to front by workspace path, then fire URI
-            if let projectDir {
-                bringWindowToFront(bundleId: bundleId, projectDir: projectDir)
+            // Try to raise the specific window by title (works across fullscreen Spaces)
+            if let projectDir, let pid = terminalPid,
+               let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+               let processName = app.localizedName {
+                let folderName = (projectDir as NSString).lastPathComponent
+                if !raiseWindowByTitle(processName: processName, titleContains: folderName) {
+                    app.activate()
+                }
+            } else if let pid = terminalPid,
+               let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+                app.activate()
             }
-            let urlString = "\(scheme)://masko.masko-terminal-focus/focus?pid=\(shellPid)"
-            if let url = URL(string: urlString) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NSWorkspace.shared.open(url)
+
+            // JetBrains: activate via AppleScript (works across fullscreen/Spaces),
+            // then HTTP request to built-in server for terminal tab focus
+            if ExtensionInstaller.isJetBrainsIDE(bundleId: bundleId) {
+                activateApp(bundleId: bundleId)
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) {
+                    let url = URL(string: "http://localhost:63342/api/masko/focus?pid=\(shellPid)")!
+                    var request = URLRequest(url: url, timeoutInterval: 1)
+                    request.httpMethod = "GET"
+                    URLSession.shared.dataTask(with: request).resume()
                 }
                 return
+            }
+
+            // VS Code family: URI scheme to extension
+            if let scheme = ExtensionInstaller.uriScheme(forBundleId: bundleId) {
+                let urlString = "\(scheme)://masko.masko-terminal-focus/focus?pid=\(shellPid)"
+                if let url = URL(string: urlString) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        NSWorkspace.shared.open(url)
+                    }
+                    return
+                }
             }
         }
 
         // Try terminal-specific tab switching (iTerm2, Terminal.app)
         if let shellPid, let bundleId {
             if activateTerminalTab(bundleId: bundleId, shellPid: shellPid) {
+                return
+            }
+        }
+
+        // Try to raise the specific window by title (handles multiple fullscreen windows)
+        if let projectDir, let pid = terminalPid,
+           let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+           let processName = app.localizedName {
+            let folderName = (projectDir as NSString).lastPathComponent
+            if raiseWindowByTitle(processName: processName, titleContains: folderName) {
                 return
             }
         }
@@ -90,6 +110,16 @@ enum IDETerminalFocus {
             "org.alacritty",
             "dev.warp.Warp-Stable",
             "com.google.antigravity",
+            "com.jetbrains.pycharm",
+            "com.jetbrains.pycharm.ce",
+            "com.jetbrains.intellij",
+            "com.jetbrains.intellij.ce",
+            "com.jetbrains.WebStorm",
+            "com.jetbrains.goland",
+            "com.jetbrains.CLion",
+            "com.jetbrains.PhpStorm",
+            "com.jetbrains.rubymine",
+            "com.jetbrains.rider",
         ]
         for id in bundleIDs {
             if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == id }) {
@@ -203,6 +233,37 @@ enum IDETerminalFocus {
         process.standardError = FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
+    }
+
+    /// Raise a specific window by matching its title. Uses Accessibility API via AppleScript
+    /// which works across fullscreen Spaces. Returns true if a matching window was found and raised.
+    @discardableResult
+    private static func raiseWindowByTitle(processName: String, titleContains: String) -> Bool {
+        let escapedProcess = processName.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedTitle = titleContains.replacingOccurrences(of: "\"", with: "\\\"")
+        let src = """
+        tell application "System Events"
+            set targetProcess to first process whose name is "\(escapedProcess)"
+            repeat with aWindow in windows of targetProcess
+                if name of aWindow contains "\(escapedTitle)" then
+                    perform action "AXRaise" of aWindow
+                    set frontmost of targetProcess to true
+                    return true
+                end if
+            end repeat
+        end tell
+        return false
+        """
+        if let script = NSAppleScript(source: src) {
+            var error: NSDictionary?
+            let result = script.executeAndReturnError(&error)
+            if error == nil {
+                return result.booleanValue
+            }
+            // Try osascript fallback
+            return runOsascript(src)
+        }
+        return false
     }
 
     /// AppleScript `tell application id` — most reliable cross-Space activation on macOS 14+.

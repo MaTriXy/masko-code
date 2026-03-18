@@ -10,7 +10,8 @@ enum ActiveCard: Int32 {
     case none = 0
     case toast = 1
     case permission = 2
-    case sessionSwitcher = 3
+    case expandedPermission = 3
+    case sessionSwitcher = 4
 }
 
 // MARK: - Thread-safe state shared between main actor and CGEvent callback
@@ -41,6 +42,9 @@ final class HotkeySharedState: @unchecked Sendable {
 
     /// Reference to the event tap for re-enabling on timeout.
     var eventTap: CFMachPort?
+
+    /// When true, the CGEvent callback passes all events through (for shortcut recording).
+    var isRecording = false
 }
 
 // MARK: - Global Hotkey Manager
@@ -80,6 +84,9 @@ final class GlobalHotkeyManager {
     /// Called when ⌘L collapses (later) the topmost non-collapsed permission.
     var onCollapsePermission: (() -> Void)?
 
+    /// Called when ⌘P expands the topmost permission to fullscreen.
+    var onExpandPermission: (() -> Void)?
+
     /// Called when double-tap Cmd opens the session switcher.
     var onSessionSwitcherOpen: (() -> Void)?
 
@@ -94,10 +101,10 @@ final class GlobalHotkeyManager {
     private var previousApp: NSRunningApplication?
 
     // MARK: - Active card (bridged to shared state)
+    // Stored property so @Observable tracks changes for SwiftUI reactivity.
 
-    var activeCard: ActiveCard {
-        get { shared.activeCard }
-        set { shared.activeCard = newValue }
+    var activeCard: ActiveCard = .none {
+        didSet { shared.activeCard = activeCard }
     }
 
     var activeSessionCount: Int {
@@ -107,17 +114,27 @@ final class GlobalHotkeyManager {
 
     /// Whether the session switcher overlay is currently showing.
     var isSessionSwitcherActive: Bool {
-        shared.activeCard == .sessionSwitcher
+        activeCard == .sessionSwitcher
+    }
+
+    /// Whether the expanded permission panel is currently showing.
+    var isExpandedPermissionActive: Bool {
+        activeCard == .expandedPermission
     }
 
     // MARK: - Configurable shortcut (stored in UserDefaults)
+
+    /// Cached key code for "M" on current keyboard layout.
+    /// Computed once at init to avoid calling TIS APIs from background threads
+    /// (TISCopyCurrentKeyboardInputSource requires main thread).
+    private static let detectedKeyCodeForM: Int64 = detectKeyCodeForM()
 
     /// The key code for the focus-toggle shortcut.
     /// Default: auto-detect M key position (46 on QWERTY, 41 on AZERTY).
     var hotkeyKeyCode: Int64 {
         get {
             let saved = UserDefaults.standard.integer(forKey: "hotkey_keyCode")
-            return saved > 0 ? Int64(saved) : Self.detectKeyCodeForM()
+            return saved > 0 ? Int64(saved) : Self.detectedKeyCodeForM
         }
         set {
             UserDefaults.standard.set(Int(newValue), forKey: "hotkey_keyCode")
@@ -235,7 +252,11 @@ final class GlobalHotkeyManager {
             Self.debugLog("CGEvent tap FAILED — AXIsProcessTrusted=\(trusted)")
             print("[masko-desktop] CGEvent tap failed — AXIsProcessTrusted=\(trusted)")
             isActive = false
-            requestAccessibilityPermission()
+            // Only prompt once - if the user already denied, don't keep showing the dialog
+            if !UserDefaults.standard.bool(forKey: "accessibilityDenied") {
+                requestAccessibilityPermission()
+                UserDefaults.standard.set(true, forKey: "accessibilityDenied")
+            }
             return
         }
 
@@ -244,6 +265,8 @@ final class GlobalHotkeyManager {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         isActive = true
+        // Clear denied flag now that accessibility is working
+        UserDefaults.standard.removeObject(forKey: "accessibilityDenied")
 
         Self.debugLog("Started! shortcut=\(shortcutLabel), keyCode=\(shared.keyCode), mods=\(shared.modifiersRaw)")
         print("[masko-desktop] Global hotkey manager started (shortcut: \(shortcutLabel))")
@@ -264,7 +287,10 @@ final class GlobalHotkeyManager {
     }
 
     /// Prompt the macOS Accessibility permission dialog.
+    /// Called from explicit user actions (onboarding, settings) and once from start().
     func requestAccessibilityPermission() {
+        // Clear denied flag so explicit user requests always show the dialog
+        UserDefaults.standard.removeObject(forKey: "accessibilityDenied")
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
         if trusted && shared.eventTap == nil {
@@ -394,6 +420,11 @@ private func globalHotkeyCallback(
     // --- keyDown: check for our shortcuts ---
     guard type == .keyDown else { return Unmanaged.passUnretained(event) }
 
+    // When recording a new shortcut, pass all events through to SwiftUI
+    if state.isRecording {
+        return Unmanaged.passUnretained(event)
+    }
+
     // Any keyDown while Cmd is held → Cmd is being used as modifier, not solitary
     if state.cmdHeld {
         state.cmdWasSolitary = false
@@ -437,6 +468,11 @@ private func globalHotkeyCallback(
 
     // Esc (no modifiers): dismiss the topmost card
     if keyCode == 53 && !flags.contains(.maskCommand) && card != .none {
+        // Skip plain ESC for permission cards to prevent accidental deny
+        // (CJK input methods use ESC to clear input). Use Cmd+ESC instead.
+        if card == .permission || card == .expandedPermission {
+            return Unmanaged.passUnretained(event) // pass through
+        }
         DispatchQueue.main.async { manager.onDismiss?() }
         return nil
     }
@@ -463,9 +499,15 @@ private func globalHotkeyCallback(
             return nil
         }
 
-        // ⌘L: collapse permission (only when a permission is on top)
-        if keyCode == 37, card == .permission {
+        // ⌘L: collapse permission (permission or expanded permission)
+        if keyCode == 37, card == .permission || card == .expandedPermission {
             DispatchQueue.main.async { manager.onCollapsePermission?() }
+            return nil
+        }
+
+        // ⌘P: expand/collapse permission to fullscreen (P = keyCode 35)
+        if keyCode == 35, card == .permission || card == .expandedPermission {
+            DispatchQueue.main.async { manager.onExpandPermission?() }
             return nil
         }
 

@@ -1,10 +1,10 @@
 import Foundation
 
-struct ClaudeSession: Identifiable, Codable {
-    let id: String // session_id from Claude Code
+struct AgentSession: Identifiable, Codable {
+    let id: String // session_id from hook event
     let projectDir: String?
     let projectName: String?
-    var assistantSource: String?
+    var agentSource: AgentSource = .claudeCode
     var status: Status
     var phase: Phase = .idle
     var eventCount: Int
@@ -35,7 +35,7 @@ struct ClaudeSession: Identifiable, Codable {
 
 @Observable
 final class SessionStore {
-    private(set) var sessions: [ClaudeSession] = []
+    private(set) var sessions: [AgentSession] = []
     private static let filename = "sessions.json"
     static let assistantProcessMatchers: [[String]] = [
         ["-x", "claude"],
@@ -55,7 +55,7 @@ final class SessionStore {
     var onPhasesChanged: (() -> Void)?
 
     init() {
-        sessions = LocalStorage.load([ClaudeSession].self, from: Self.filename) ?? []
+        sessions = LocalStorage.load([AgentSession].self, from: Self.filename) ?? []
         reconcileIfNeeded()
         startReconcileTimer()
         startInterruptWatcher()
@@ -280,15 +280,15 @@ final class SessionStore {
 
     // MARK: - Computed Properties
 
-    var activeSessions: [ClaudeSession] {
+    var activeSessions: [AgentSession] {
         sessions.filter { $0.status == .active }
     }
 
-    var runningSessions: [ClaudeSession] {
+    var runningSessions: [AgentSession] {
         activeSessions.filter { $0.phase == .running }
     }
 
-    var idleSessions: [ClaudeSession] {
+    var idleSessions: [AgentSession] {
         activeSessions.filter { $0.phase == .idle }
     }
 
@@ -302,7 +302,7 @@ final class SessionStore {
 
     // MARK: - Event Recording
 
-    func recordEvent(_ event: ClaudeEvent) {
+    func recordEvent(_ event: AgentEvent) {
         guard let sessionId = event.sessionId, !sessionId.isEmpty else { return }
 
         if let index = sessions.firstIndex(where: { $0.id == sessionId }) {
@@ -312,7 +312,7 @@ final class SessionStore {
                 sessions[index].lastToolName = toolName
             }
             if let source = event.source, !source.isEmpty {
-                sessions[index].assistantSource = source
+                sessions[index].agentSource = AgentSource(rawSource: source)
             }
             if let path = event.transcriptPath, sessions[index].transcriptPath == nil {
                 sessions[index].transcriptPath = path
@@ -386,12 +386,12 @@ final class SessionStore {
             }
         } else {
             // New session
-            let phase: ClaudeSession.Phase = event.eventType == .userPromptSubmit ? .running : .idle
-            var session = ClaudeSession(
+            let phase: AgentSession.Phase = event.eventType == .userPromptSubmit ? .running : .idle
+            var session = AgentSession(
                 id: sessionId,
                 projectDir: event.cwd,
                 projectName: event.projectName,
-                assistantSource: event.source,
+                agentSource: AgentSource(rawSource: event.source),
                 status: .active,
                 phase: phase,
                 eventCount: 1,

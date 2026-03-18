@@ -1,8 +1,7 @@
 import AppKit
 import Foundation
 
-/// Best-effort bridge that sends mascot decisions back to an active Codex terminal session.
-/// This path is only used for Codex-originated local permission requests.
+/// Best-effort focus bridge for Codex sessions when terminal PID metadata is unavailable.
 enum CodexInteractiveBridge {
     struct ProcessInfo {
         let pid: Int
@@ -10,8 +9,7 @@ enum CodexInteractiveBridge {
         let tty: String?
     }
 
-    /// Writing bytes to the tty device path only prints to the terminal on macOS.
-    /// Codex does not currently expose a supported background input transport here.
+    /// Background replies are not supported via this bridge.
     static let supportsBackgroundReplies = false
 
     private static let codexProcessMatchers: [[String]] = [
@@ -22,40 +20,12 @@ enum CodexInteractiveBridge {
         ["-f", "Codex Desktop"],
     ]
 
-    static func submit(
-        resolution: LocalPermissionResolution,
-        event: ClaudeEvent,
-        processInfos: [ProcessInfo]? = nil,
-        writer: ((String, String) -> Bool)? = nil
-    ) -> Bool {
-        guard event.assistantClientKind != .claude else { return false }
-        guard let input = inputText(for: resolution, event: event), !input.isEmpty else { return false }
-        guard let write = writer else {
-            print("[masko-desktop] Codex local reply transport unavailable; tty device writes do not inject input on macOS")
-            return false
-        }
-
-        let infos = processInfos ?? runningCodexProcesses()
-        guard let target = selectProcess(for: event, from: infos),
-              let tty = target.tty, !tty.isEmpty else {
-            return false
-        }
-
-        let success = write(tty, input)
-        if success {
-            print("[masko-desktop] Codex bridge wrote resolution to \(tty) (pid=\(target.pid))")
-        } else {
-            print("[masko-desktop] Codex bridge failed to write resolution to \(tty) (pid=\(target.pid))")
-        }
-        return success
-    }
-
     static func focus(
-        event: ClaudeEvent,
+        event: AgentEvent,
         processInfos: [ProcessInfo]? = nil,
         activator: ((Int) -> Bool)? = nil
     ) -> Bool {
-        guard event.assistantClientKind != .claude else { return false }
+        guard AgentSource(rawSource: event.source) == .codex else { return false }
 
         let infos = processInfos ?? runningCodexProcesses()
         guard let target = selectProcess(for: event, from: infos) else {
@@ -72,28 +42,7 @@ enum CodexInteractiveBridge {
         return success
     }
 
-    static func inputText(for resolution: LocalPermissionResolution, event: ClaudeEvent? = nil) -> String? {
-        switch resolution {
-        case .decision(let decision):
-            return decision == .allow ? "y\r" : "n\r"
-        case .answers(let answers):
-            let values = orderedAnswerValues(answers, event: event)
-            guard !values.isEmpty else { return nil }
-            return values.joined(separator: "\r") + "\r"
-        case .feedback(let feedback):
-            let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            // Codex approval prompts expose feedback as a distinct branch before text entry.
-            return "e\r" + trimmed + "\r"
-        case .permissionSuggestions(let suggestions):
-            if suggestions.contains(where: { $0.type == "addRules" }) {
-                return "p\r"
-            }
-            return "y\r"
-        }
-    }
-
-    static func selectProcess(for event: ClaudeEvent, from infos: [ProcessInfo]) -> ProcessInfo? {
+    static func selectProcess(for event: AgentEvent, from infos: [ProcessInfo]) -> ProcessInfo? {
         guard !infos.isEmpty else { return nil }
 
         if let cwd = normalized(path: event.cwd) {
@@ -117,7 +66,7 @@ enum CodexInteractiveBridge {
         }
 
         // Desktop sessions are frequently launched without a reliable cwd match.
-        // Prefer the newest interactive TTY process so mascot approvals still route.
+        // Prefer the newest interactive TTY process so mascot "open terminal" still works.
         if event.assistantClientKind == .codexDesktop,
            let newestTTY = ttyInfos.max(by: { $0.pid < $1.pid }) {
             return newestTTY
@@ -129,45 +78,6 @@ enum CodexInteractiveBridge {
         }
 
         return nil
-    }
-
-    private static func orderedAnswerValues(_ answers: [String: String], event: ClaudeEvent?) -> [String] {
-        guard let orderedKeys = orderedAnswerKeys(from: event), !orderedKeys.isEmpty else {
-            return answers.keys.sorted().compactMap { answers[$0] }
-        }
-
-        var values: [String] = []
-        var usedKeys = Set<String>()
-
-        for key in orderedKeys where !usedKeys.contains(key) {
-            guard let value = answers[key] else { continue }
-            values.append(value)
-            usedKeys.insert(key)
-        }
-
-        let remainingKeys = answers.keys
-            .filter { !usedKeys.contains($0) }
-            .sorted()
-        values.append(contentsOf: remainingKeys.compactMap { answers[$0] })
-        return values
-    }
-
-    private static func orderedAnswerKeys(from event: ClaudeEvent?) -> [String]? {
-        guard let questions = event?.toolInput?["questions"]?.value as? [Any] else { return nil }
-
-        var keys: [String] = []
-        for question in questions {
-            guard let dict = question as? [String: Any] ?? (question as? [String: AnyCodable])?.mapValues(\.value) else {
-                continue
-            }
-            if let id = dict["id"] as? String, !id.isEmpty {
-                keys.append(id)
-            }
-            if let text = dict["question"] as? String, !text.isEmpty {
-                keys.append(text)
-            }
-        }
-        return keys.isEmpty ? nil : keys
     }
 
     private static func runningCodexProcesses() -> [ProcessInfo] {

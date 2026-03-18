@@ -154,7 +154,9 @@ Sources/
 ├── Utilities/       # Helpers
 └── Resources/       # Assets, images, app icon
 scripts/             # DMG packaging scripts
-vscode-extension/    # IDE click-to-focus extension
+extensions/
+├── vscode/          # VS Code/Cursor click-to-focus extension
+└── jetbrains/       # JetBrains (PyCharm, IntelliJ, etc.) terminal focus plugin
 ```
 
 ## Contributing
@@ -164,3 +166,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 ## License
 
 [MIT License](LICENSE) — Copyright (c) 2026 Masko.
+
+---
+
+> **Note:** This project has no cryptocurrency or token associated with it. Any coin using the Masko or Clippy name is not affiliated with us.

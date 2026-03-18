@@ -57,6 +57,20 @@ final class OverlayManager {
     // Context menu panel
     private var contextPanel: ContextMenuPanel?
 
+    // Expanded permission panel (fullscreen-style, triggered by Cmd+P)
+    private var expandedPanel: NSPanel?
+
+    // Auto-hide when no Claude Code sessions are active
+    private(set) var isAutoHideEnabled: Bool = UserDefaults.standard.object(forKey: "auto_hide_no_sessions") != nil
+        ? UserDefaults.standard.bool(forKey: "auto_hide_no_sessions")
+        : false  // Default off
+    private(set) var isAutoHidden = false
+    private var autoHideTimer: Timer?
+    private(set) var autoHideDelay: TimeInterval = {
+        let saved = UserDefaults.standard.double(forKey: "auto_hide_delay")
+        return saved >= 0 && UserDefaults.standard.object(forKey: "auto_hide_delay") != nil ? saved : 15
+    }()
+
     // Coalescing flag for HUD repositioning — prevents recursive layout cycles
     private var hudRepositionScheduled = false
 
@@ -271,6 +285,7 @@ final class OverlayManager {
         pendingPermissionStore.onPendingChange = { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self?.scheduleHUDReposition()
+                self?.dismissExpandedPermission()
             }
         }
 
@@ -314,9 +329,14 @@ final class OverlayManager {
     /// Recompute aggregate session state and push inputs to the state machine.
     /// Can be called independently (e.g. after interrupt detection) without needing an event.
     func refreshInputs() {
+        let active = sessionStore.activeSessions
+
+        // Auto-hide: fade out when all sessions idle, fade in when any session is working
+        let anyWorking = active.contains { $0.phase == .running || $0.phase == .compacting }
+        updateAutoHideState(isWorking: anyWorking)
+
         guard let sm = currentStateMachine else { return }
 
-        let active = sessionStore.activeSessions
         let isWorking = active.contains { $0.phase == .running }
         let isIdle = active.allSatisfy { $0.phase == .idle } || active.isEmpty
         // Only alert if a pending permission belongs to a session that's still active
@@ -329,22 +349,120 @@ final class OverlayManager {
         let isCompacting = active.contains { $0.isCompacting }
         let sessionCount = active.count
 
-        sm.setInput("claudeCode::isWorking", .bool(isWorking))
-        sm.setInput("claudeCode::isIdle", .bool(isIdle))
-        sm.setInput("claudeCode::isAlert", .bool(isAlert))
-        sm.setInput("claudeCode::isCompacting", .bool(isCompacting))
-        sm.setInput("claudeCode::sessionCount", .number(Double(sessionCount)))
+        sm.setAgentStateInput("isWorking", .bool(isWorking))
+        sm.setAgentStateInput("isIdle", .bool(isIdle))
+        sm.setAgentStateInput("isAlert", .bool(isAlert))
+        sm.setAgentStateInput("isCompacting", .bool(isCompacting))
+        sm.setAgentStateInput("sessionCount", .number(Double(sessionCount)))
+    }
+
+    // MARK: - Auto-Hide (no active sessions)
+
+    func setAutoHideEnabled(_ enabled: Bool) {
+        isAutoHideEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "auto_hide_no_sessions")
+        if enabled {
+            // Start tracking immediately
+            let anyWorking = sessionStore.activeSessions.contains { $0.phase == .running || $0.phase == .compacting }
+            updateAutoHideState(isWorking: anyWorking)
+        } else {
+            // Cancel any pending hide and restore if hidden
+            autoHideTimer?.invalidate()
+            autoHideTimer = nil
+            if isAutoHidden {
+                fadeInFromAutoHide()
+            }
+        }
+    }
+
+    func setAutoHideDelay(_ delay: TimeInterval) {
+        autoHideDelay = delay
+        UserDefaults.standard.set(autoHideDelay, forKey: "auto_hide_delay")
+        // Restart timer if one is already running
+        if autoHideTimer != nil {
+            autoHideTimer?.invalidate()
+            autoHideTimer = nil
+            let anyWorking = sessionStore.activeSessions.contains { $0.phase == .running || $0.phase == .compacting }
+            updateAutoHideState(isWorking: anyWorking)
+        }
+    }
+
+    private func updateAutoHideState(isWorking: Bool) {
+        guard isAutoHideEnabled, isOverlayActive || isAutoHidden else { return }
+
+        if isWorking {
+            // A session is working — cancel any pending hide and restore if hidden
+            autoHideTimer?.invalidate()
+            autoHideTimer = nil
+            if isAutoHidden {
+                fadeInFromAutoHide()
+            }
+        } else if !isAutoHidden && autoHideTimer == nil {
+            // All sessions idle — start countdown to fade out
+            autoHideTimer = Timer.scheduledTimer(withTimeInterval: autoHideDelay, repeats: false) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.fadeOutForAutoHide()
+                }
+            }
+        }
+    }
+
+    private func fadeOutForAutoHide() {
+        autoHideTimer = nil
+        guard isOverlayActive, !isAutoHidden else { return }
+        isAutoHidden = true
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.6
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel?.animator().alphaValue = 0
+            statsPanel?.animator().alphaValue = 0
+            permissionPanel?.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isAutoHidden else { return }
+                self.panel?.orderOut(nil)
+                self.statsPanel?.orderOut(nil)
+                self.permissionPanel?.orderOut(nil)
+                print("[masko-desktop] Auto-hidden (no active sessions)")
+            }
+        }
+    }
+
+    private func fadeInFromAutoHide() {
+        guard isAutoHidden else { return }
+        isAutoHidden = false
+
+        // Restore panels to screen (invisible first)
+        panel?.alphaValue = 0
+        statsPanel?.alphaValue = 0
+        permissionPanel?.alphaValue = 0
+        panel?.orderFrontRegardless()
+        statsPanel?.orderFrontRegardless()
+        permissionPanel?.orderFrontRegardless()
+
+        let savedOpacity = UserDefaults.standard.double(forKey: "overlay_opacity")
+        let targetOpacity = savedOpacity > 0 ? savedOpacity : 1.0
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.4
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.panel?.animator().alphaValue = targetOpacity
+            self.statsPanel?.animator().alphaValue = 1.0
+            self.permissionPanel?.animator().alphaValue = 1.0
+        }
+
+        print("[masko-desktop] Auto-shown (session detected)")
     }
 
     /// Compute aggregate session state and push inputs to the state machine.
     /// Called after SessionStore.recordEvent() has already updated session phases.
-    func handleEvent(_ event: ClaudeEvent) {
+    func handleEvent(_ event: AgentEvent) {
         refreshInputs()
 
         // Fire granular event trigger (auto-resets after transition)
         guard let sm = currentStateMachine else { return }
-        let eventInput = "claudeCode::\(event.hookEventName)"
-        sm.setInput(eventInput, .bool(true))
+        sm.setAgentEventTrigger(event.hookEventName)
     }
 
     /// Temporarily hide the overlay and restore it after the given duration.
@@ -398,6 +516,11 @@ final class OverlayManager {
     }
 
     func hideOverlay(clearConfig: Bool = true) {
+        // Reset auto-hide state
+        autoHideTimer?.invalidate()
+        autoHideTimer = nil
+        isAutoHidden = false
+
         // Remove all observers
         for observer in workspaceObservers {
             NotificationCenter.default.removeObserver(observer)
@@ -670,12 +793,16 @@ final class OverlayManager {
         if let configData = UserDefaults.standard.data(forKey: "overlay_config"),
            let config = try? JSONDecoder().decode(MaskoAnimationConfig.self, from: configData) {
             showOverlayWithConfig(config)
+            // Start auto-hide timer if no sessions active on launch
+            updateAutoHideState(isWorking: sessionStore.activeSessions.contains { $0.phase == .running || $0.phase == .compacting })
             return
         }
         // Fall back to URL-based overlay (single video loop)
         guard let urlString = UserDefaults.standard.string(forKey: "overlay_url"),
               let url = URL(string: urlString) else { return }
         showOverlay(url: url)
+        // Start auto-hide timer if no sessions active on launch
+        updateAutoHideState(isWorking: sessionStore.activeSessions.contains { $0.phase == .running || $0.phase == .compacting })
     }
 
     // MARK: - Private
@@ -786,6 +913,92 @@ final class OverlayManager {
         permissionPanel = nil
         statsPanel?.close()
         statsPanel = nil
+    }
+
+    // MARK: - Expanded Permission (Cmd+P fullscreen)
+
+    /// Whether the expanded permission panel is currently showing.
+    var isExpandedPermissionActive: Bool { expandedPanel != nil }
+
+    /// Show the topmost pending permission in a large centered panel.
+    /// Toggles: if already showing, dismiss it.
+    func showExpandedPermission() {
+        if expandedPanel != nil {
+            dismissExpandedPermission()
+            return
+        }
+
+        // Find the topmost non-collapsed permission
+        let nonCollapsed = pendingPermissionStore.pending.filter {
+            !pendingPermissionStore.collapsed.contains($0.id)
+        }
+        guard let permission = nonCollapsed.first else { return }
+
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let width = min(screen.width * 0.7, 800)
+        let height = min(screen.height * 0.75, 600)
+        let rect = NSRect(
+            x: screen.midX - width / 2,
+            y: screen.midY - height / 2,
+            width: width,
+            height: height
+        )
+
+        // Use OverlayPanel so it stays on top across spaces, like the mascot
+        let newPanel = OverlayPanel(contentRect: rect)
+        newPanel.isMovableByWindowBackground = true
+
+        let permissionId = permission.id
+        let view = PermissionContentView(
+            permission: permission,
+            mode: .expanded,
+            onDecision: { [weak self] decision in
+                self?.pendingPermissionStore.resolve(id: permissionId, decision: decision)
+            },
+            onAnswers: { [weak self] answers in
+                self?.pendingPermissionStore.resolveWithAnswers(id: permissionId, answers: answers)
+            },
+            onFeedback: { [weak self] feedback in
+                self?.pendingPermissionStore.resolveWithFeedback(id: permissionId, feedback: feedback)
+            },
+            onAllowWithPermissions: { [weak self] suggestions in
+                self?.pendingPermissionStore.resolveWithPermissions(id: permissionId, suggestions: suggestions)
+            },
+            onLater: { [weak self] in
+                self?.dismissExpandedPermission()
+                self?.pendingPermissionStore.collapse(id: permissionId)
+            },
+            onToggleMode: { [weak self] in
+                self?.dismissExpandedPermission()
+            }
+        )
+        .environment(pendingPermissionStore)
+        .environment(sessionStore)
+        .environment(hotkeyManager)
+
+        let controller = TransparentHostingController(rootView: view)
+        newPanel.contentView = controller.view
+        newPanel.contentViewController = controller
+
+        newPanel.orderFrontRegardless()
+        SkyLightOperator.shared.delegateWindow(newPanel)
+
+        // Set active card to expanded so shortcuts target the expanded panel, not the small bubble
+        hotkeyManager.activeCard = .expandedPermission
+
+        self.expandedPanel = newPanel
+        print("[masko-desktop] Expanded permission panel shown")
+    }
+
+    func dismissExpandedPermission() {
+        expandedPanel?.close()
+        expandedPanel = nil
+        // Restore active card to permission so shortcuts target the small bubble again
+        if !pendingPermissionStore.pending.isEmpty {
+            hotkeyManager.activeCard = .permission
+        } else {
+            hotkeyManager.activeCard = .none
+        }
     }
 
     // MARK: - Session Switcher (rendered inside permission panel)

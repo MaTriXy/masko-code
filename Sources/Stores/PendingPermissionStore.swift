@@ -1,14 +1,4 @@
 import Foundation
-import Network
-
-enum LocalPermissionResolution {
-    case decision(PermissionDecision)
-    case answers([String: String])
-    case feedback(String)
-    case permissionSuggestions([PermissionSuggestion])
-}
-
-typealias LocalPermissionResolutionHandler = (LocalPermissionResolution) -> Bool
 
 // MARK: - Permission suggestion model (matches Claude Code protocol)
 
@@ -77,19 +67,14 @@ struct ParsedOption {
 
 struct PendingPermission: Identifiable {
     let id: UUID
-    let event: ClaudeEvent
-    let connection: NWConnection?
-    let localResolutionHandler: LocalPermissionResolutionHandler?
+    let event: AgentEvent
+    let transport: ResponseTransport
     let receivedAt: Date
     /// tool_use_id correlated from the preceding PreToolUse event
     /// (PermissionRequest events from Claude Code don't include tool_use_id)
     let resolvedToolUseId: String?
 
     var toolName: String { event.toolName ?? "Unknown" }
-    var isCodexEscalation: Bool {
-        event.assistantClientKind != .claude &&
-        event.toolInput?["sandbox_permissions"]?.stringValue?.lowercased() == "require_escalated"
-    }
 
     /// Parse permission suggestions from Claude Code protocol
     var permissionSuggestions: [PermissionSuggestion] {
@@ -122,10 +107,31 @@ struct PendingPermission: Identifiable {
     /// For AskUserQuestion: parse structured questions with options
     var parsedQuestions: [ParsedQuestion]? {
         guard event.toolName == "AskUserQuestion" else { return nil }
-        guard let questionsArray = questionElements else { return nil }
+        guard let input = event.toolInput else { return nil }
+        guard let rawQuestions = input["questions"]?.value else { return nil }
+
+        // Handle both [Any] (from AnyCodable unwrap) and [[String: Any]] casts
+        let questionsArray: [Any]
+        if let arr = rawQuestions as? [[String: Any]] {
+            questionsArray = arr
+        } else if let arr = rawQuestions as? [Any] {
+            questionsArray = arr
+        } else {
+            print("[masko-desktop] parsedQuestions: unexpected type for questions: \(type(of: rawQuestions))")
+            return nil
+        }
 
         let result = questionsArray.compactMap { element -> ParsedQuestion? in
-            guard let q = questionDictionary(from: element) else { return nil }
+            // Handle both [String: Any] and [String: AnyCodable]
+            let q: [String: Any]
+            if let dict = element as? [String: Any] {
+                q = dict
+            } else if let dict = element as? [String: AnyCodable] {
+                q = dict.mapValues(\.value)
+            } else {
+                return nil
+            }
+
             guard let text = q["question"] as? String else { return nil }
             let header = q["header"] as? String
             let multiSelect = q["multiSelect"] as? Bool ?? false
@@ -172,10 +178,10 @@ struct PendingPermission: Identifiable {
         } else if let path = input["path"]?.value as? String {
             raw = path
         // For AskUserQuestion: show first question text
-        } else if let firstQuestionText = questionElements?
-            .compactMap(questionText(from:))
-            .first {
-            raw = firstQuestionText
+        } else if let questions = input["questions"]?.value as? [[String: Any]],
+                  let firstQ = questions.first,
+                  let questionText = firstQ["question"] as? String {
+            raw = questionText
         // Fallback: first string value
         } else if let first = input.values.first(where: { ($0.value as? String)?.isEmpty == false }),
                   let str = first.value as? String {
@@ -211,8 +217,11 @@ struct PendingPermission: Identifiable {
             } else {
                 raw = path
             }
-        } else if let questions = questionElements {
-            raw = questions.compactMap(questionText(from:)).joined(separator: "\n\n")
+        } else if let questions = input["questions"]?.value as? [[String: Any]] {
+            raw = questions.compactMap { q in
+                guard let text = q["question"] as? String else { return nil as String? }
+                return text
+            }.joined(separator: "\n\n")
         } else if let prompt = input["prompt"]?.value as? String {
             raw = prompt
         } else {
@@ -223,38 +232,6 @@ struct PendingPermission: Identifiable {
             }.joined(separator: "\n")
         }
         return raw.trimmingCharacters(in: .whitespaces)
-    }
-
-    private var questionElements: [Any]? {
-        guard let rawQuestions = event.toolInput?["questions"]?.value else { return nil }
-        if let arr = rawQuestions as? [Any] {
-            return arr
-        }
-        if let arr = rawQuestions as? [[String: Any]] {
-            return arr
-        }
-        if let arr = rawQuestions as? [[String: String]] {
-            return arr
-        }
-        print("[masko-desktop] parsedQuestions: unexpected type for questions: \(type(of: rawQuestions))")
-        return nil
-    }
-
-    private func questionDictionary(from element: Any) -> [String: Any]? {
-        if let dict = element as? [String: Any] {
-            return dict
-        }
-        if let dict = element as? [String: AnyCodable] {
-            return dict.mapValues(\.value)
-        }
-        if let dict = element as? [String: String] {
-            return dict.mapValues { $0 }
-        }
-        return nil
-    }
-
-    private func questionText(from element: Any) -> String? {
-        questionDictionary(from: element)?["question"] as? String
     }
 
     /// For ExitPlanMode: read the plan file content from disk
@@ -370,8 +347,17 @@ final class PendingPermissionStore {
     private(set) var pending: [PendingPermission] = []
     /// Permissions the user chose to defer ("Later") — hidden from overlay but connection stays open
     private(set) var collapsed: Set<UUID> = []
+    /// Shared interaction state per permission — survives expand/collapse transitions
+    private var interactionStates: [UUID: PermissionInteractionState] = [:]
+
+    func interactionState(for id: UUID) -> PermissionInteractionState {
+        if let existing = interactionStates[id] { return existing }
+        let state = PermissionInteractionState()
+        interactionStates[id] = state
+        return state
+    }
     /// Called when a permission is resolved — used to update notification outcome
-    var onResolved: ((ClaudeEvent, ResolutionOutcome) -> Void)?
+    var onResolved: ((AgentEvent, ResolutionOutcome) -> Void)?
     /// Called when pending permissions change — used to resize/reposition the overlay panel
     var onPendingChange: (() -> Void)?
     /// Secondary callback for pending changes — used by hotkey manager (avoids overwriting primary)
@@ -396,7 +382,7 @@ final class PendingPermissionStore {
         preToolUseCache[key] = toolUseId
     }
 
-    func add(event: ClaudeEvent, connection: NWConnection) {
+    func add(event: AgentEvent, transport: ResponseTransport) {
         // Correlate with preceding PreToolUse to recover tool_use_id
         // (PermissionRequest events from Claude Code don't include tool_use_id)
         var resolvedToolUseId = event.toolUseId
@@ -411,8 +397,7 @@ final class PendingPermissionStore {
         let permission = PendingPermission(
             id: UUID(),
             event: event,
-            connection: connection,
-            localResolutionHandler: nil,
+            transport: transport,
             receivedAt: Date(),
             resolvedToolUseId: resolvedToolUseId
         )
@@ -420,35 +405,16 @@ final class PendingPermissionStore {
         onPendingChange?()
         onPendingCountChange?()
 
-        // Monitor connection — if the hook script exits (user answered in terminal),
-        // the receive completes and we auto-dismiss without sending a response.
-        monitorConnection(connection, permissionId: permission.id)
+        // Monitor transport - if the agent answers from terminal,
+        // the transport closes and we auto-dismiss without sending a response.
+        transport.onRemoteClose { [weak self] in
+            self?.silentRemove(id: permission.id)
+        }
 
         print("[masko-desktop] Permission added: \(event.toolName ?? "unknown") toolUseId=\(resolvedToolUseId ?? "nil") (pending: \(pending.count))")
     }
 
-    /// Add a local (non-hook-connection) permission request, used for Codex log-derived escalations.
-    func addLocal(event: ClaudeEvent, onResolve: @escaping LocalPermissionResolutionHandler) {
-        let resolvedToolUseId = event.toolUseId
-        if isDuplicate(event: event, resolvedToolUseId: resolvedToolUseId) {
-            return
-        }
-
-        let permission = PendingPermission(
-            id: UUID(),
-            event: event,
-            connection: nil,
-            localResolutionHandler: onResolve,
-            receivedAt: Date(),
-            resolvedToolUseId: resolvedToolUseId
-        )
-        pending.append(permission)
-        onPendingChange?()
-        onPendingCountChange?()
-        print("[masko-desktop] Local permission added: \(event.toolName ?? "unknown") toolUseId=\(resolvedToolUseId ?? "nil") (pending: \(pending.count))")
-    }
-
-    private func isDuplicate(event: ClaudeEvent, resolvedToolUseId: String?) -> Bool {
+    private func isDuplicate(event: AgentEvent, resolvedToolUseId: String?) -> Bool {
         guard let sessionId = event.sessionId else { return false }
 
         if let toolUseId = resolvedToolUseId,
@@ -493,30 +459,7 @@ final class PendingPermissionStore {
         collapsed.remove(id)
     }
 
-    /// Watch for remote TCP close via both receive() and state handler.
-    /// Covers all disconnect scenarios: clean close, SIGKILL, broken pipe.
-    private func monitorConnection(_ connection: NWConnection, permissionId id: UUID) {
-        // State handler catches cancelled/failed connections that receive() might miss
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .cancelled, .failed:
-                DispatchQueue.main.async { self?.silentRemove(id: id) }
-            default:
-                break
-            }
-        }
-
-        // Receive-based monitoring catches clean TCP close
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, isComplete, error in
-            if isComplete || error != nil {
-                DispatchQueue.main.async { self?.silentRemove(id: id) }
-            } else {
-                self?.monitorConnection(connection, permissionId: id)
-            }
-        }
-    }
-
-    /// Periodically check for stale permissions whose connections died silently
+    /// Periodically check for stale permissions whose transports died silently
     private var livenessTimer: Timer?
 
     func startLivenessChecks() {
@@ -525,13 +468,12 @@ final class PendingPermissionStore {
         }
     }
 
-    /// Invalidate timers and cancel all open connections — called on app termination
+    /// Invalidate timers and cancel all open transports - called on app termination
     func stopTimers() {
         livenessTimer?.invalidate()
         livenessTimer = nil
-        // Cancel all held NWConnections so they don't linger
         for perm in pending {
-            perm.connection?.cancel()
+            perm.transport.cancel()
         }
         pending.removeAll()
     }
@@ -542,13 +484,7 @@ final class PendingPermissionStore {
 
     private func checkConnectionLiveness() {
         let staleIds = pending.compactMap { perm -> UUID? in
-            guard let connection = perm.connection else { return nil }
-            switch connection.state {
-            case .cancelled, .failed:
-                return perm.id
-            default:
-                return nil
-            }
+            perm.transport.isAlive ? nil : perm.id
         }
         for id in staleIds {
             silentRemove(id: id)
@@ -593,6 +529,7 @@ final class PendingPermissionStore {
         let permission = pending[index]
 
         collapsed.remove(id)
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -606,24 +543,9 @@ final class PendingPermissionStore {
 
         collapsed.remove(id)
 
-        if let connection = permission.connection {
-            // Send HTTP response on the held hook connection (Claude Code path)
-            let (status, body, exitHint) = decision.httpResponse
-            let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\nX-Exit-Code: \(exitHint)\r\n\r\n\(body)"
-            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                connection.cancel()
-            })
-        } else if let localResolutionHandler = permission.localResolutionHandler {
-            // Local resolver (Codex log-derived path)
-            let wasHandled = localResolutionHandler(.decision(decision))
-            if !wasHandled {
-                print("[masko-desktop] Local permission decision could not be delivered for \(permission.toolName)")
-                return
-            }
-        } else {
-            print("[masko-desktop] No permission transport available for \(permission.toolName)")
-        }
+        permission.transport.sendDecision(decision)
 
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -636,21 +558,6 @@ final class PendingPermissionStore {
     func resolveWithAnswers(id: UUID, answers: [String: String]) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
-        if let localResolutionHandler = permission.localResolutionHandler {
-            let wasHandled = localResolutionHandler(.answers(answers))
-            if !wasHandled {
-                print("[masko-desktop] Local answers could not be delivered for \(permission.toolName)")
-                return
-            }
-            collapsed.remove(id)
-            pending.remove(at: index)
-            onPendingChange?()
-            onPendingCountChange?()
-            onResolved?(permission.event, .allowed)
-            print("[masko-desktop] Local answers resolved for \(permission.toolName) (remaining: \(pending.count))")
-            return
-        }
-        guard let connection = permission.connection else { return }
 
         collapsed.remove(id)
 
@@ -663,25 +570,9 @@ final class PendingPermissionStore {
         }
         updatedInput["answers"] = answers
 
-        // Build response JSON
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedInput": updatedInput
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedInput(updatedInput)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -693,21 +584,6 @@ final class PendingPermissionStore {
     func resolveWithFeedback(id: UUID, feedback: String) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
-        if let localResolutionHandler = permission.localResolutionHandler {
-            let wasHandled = localResolutionHandler(.feedback(feedback))
-            if !wasHandled {
-                print("[masko-desktop] Local feedback could not be delivered for \(permission.toolName)")
-                return
-            }
-            collapsed.remove(id)
-            pending.remove(at: index)
-            onPendingChange?()
-            onPendingCountChange?()
-            onResolved?(permission.event, .allowed)
-            print("[masko-desktop] Local feedback resolved for \(permission.toolName) (remaining: \(pending.count))")
-            return
-        }
-        guard let connection = permission.connection else { return }
 
         collapsed.remove(id)
 
@@ -719,24 +595,9 @@ final class PendingPermissionStore {
         }
         updatedInput["userFeedback"] = feedback
 
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedInput": updatedInput
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedInput(updatedInput)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()
@@ -748,43 +609,13 @@ final class PendingPermissionStore {
     func resolveWithPermissions(id: UUID, suggestions: [PermissionSuggestion]) {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let permission = pending[index]
-        if let localResolutionHandler = permission.localResolutionHandler {
-            let wasHandled = localResolutionHandler(.permissionSuggestions(suggestions))
-            if !wasHandled {
-                print("[masko-desktop] Local permission suggestions could not be delivered for \(permission.toolName)")
-                return
-            }
-            collapsed.remove(id)
-            pending.remove(at: index)
-            onPendingChange?()
-            onPendingCountChange?()
-            onResolved?(permission.event, .allowed)
-            print("[masko-desktop] Local permission suggestions resolved for \(permission.toolName) (remaining: \(pending.count))")
-            return
-        }
-        guard let connection = permission.connection else { return }
 
         collapsed.remove(id)
 
         let updatedPermissions: [[String: Any]] = suggestions.map { $0.toDict }
-        let decision: [String: Any] = [
-            "behavior": "allow",
-            "updatedPermissions": updatedPermissions
-        ]
-        let hookOutput: [String: Any] = [
-            "hookEventName": "PermissionRequest",
-            "decision": decision
-        ]
-        let responseObj: [String: Any] = ["hookSpecificOutput": hookOutput]
+        permission.transport.sendAllowWithUpdatedPermissions(updatedPermissions)
 
-        if let data = try? JSONSerialization.data(withJSONObject: responseObj),
-           let body = String(data: data, encoding: .utf8) {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-                connection.cancel()
-            })
-        }
-
+        interactionStates.removeValue(forKey: pending[index].id)
         pending.remove(at: index)
         onPendingChange?()
         onPendingCountChange?()

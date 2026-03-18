@@ -4,7 +4,6 @@ struct MenuBarView: View {
     @Environment(AppStore.self) var appStore
     @Environment(OverlayManager.self) var overlayManager
     @Environment(AppUpdater.self) var appUpdater
-
     var body: some View {
         VStack(spacing: 0) {
             // Header

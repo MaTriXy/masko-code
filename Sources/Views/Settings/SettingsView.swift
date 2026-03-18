@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppStore.self) var appStore
     @Environment(AppUpdater.self) var appUpdater
+    @Environment(OverlayManager.self) var overlayManager
     @State private var isHookEnabled = false
     @State private var hookError: String?
     @State private var showUninstallConfirm = false
@@ -15,6 +16,7 @@ struct SettingsView: View {
     @State private var extensionError: String?
     @State private var extensionBusy = false
     @State private var installingIDE: String?  // command of IDE currently being installed
+    @State private var autoHideDelayText: String = "15"
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
@@ -110,6 +112,31 @@ struct SettingsView: View {
                     Text(error)
                         .font(.system(size: 11))
                         .foregroundColor(.red)
+                }
+
+                Toggle("Auto-hide when no sessions", isOn: Binding(
+                    get: { overlayManager.isAutoHideEnabled },
+                    set: { overlayManager.setAutoHideEnabled($0) }
+                ))
+                .foregroundColor(Constants.textPrimary)
+
+                if overlayManager.isAutoHideEnabled {
+                    HStack {
+                        Text("Delay (seconds)")
+                            .foregroundColor(Constants.textPrimary)
+                        Spacer()
+                        TextField("", text: $autoHideDelayText)
+                            .frame(width: 70)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .font(.system(size: 12, design: .monospaced))
+                            .onSubmit {
+                                if let value = Int(autoHideDelayText), value >= 0 {
+                                    overlayManager.setAutoHideDelay(TimeInterval(value))
+                                }
+                                autoHideDelayText = String(Int(overlayManager.autoHideDelay))
+                            }
+                    }
                 }
             } header: {
                 Text("Claude Code").font(Constants.heading(size: 13, weight: .semibold))
@@ -324,6 +351,19 @@ struct SettingsView: View {
                             .font(.caption)
                     }
                 }
+                Link(destination: URL(string: Constants.githubRepoURL)!) {
+                    HStack {
+                        Image(systemName: "star")
+                            .foregroundColor(Constants.orangePrimary)
+                            .font(.system(size: 12))
+                        Text("Star on GitHub")
+                            .foregroundColor(Constants.orangePrimary)
+                        Spacer()
+                        Image(systemName: "arrow.up.forward")
+                            .foregroundColor(Constants.orangePrimary)
+                            .font(.caption)
+                    }
+                }
             } header: {
                 Text("About").font(Constants.heading(size: 13, weight: .semibold))
             }
@@ -349,11 +389,29 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden)
         .background(Constants.lightBackground)
         .navigationTitle("Settings")
-        .onAppear {
+        .task {
+            // Fast, synchronous — safe on main thread
             isHookEnabled = HookInstaller.isRegistered()
             videoCacheSize = VideoCache.shared.cacheSize
-            refreshIDEStatuses()
+            autoHideDelayText = String(Int(overlayManager.autoHideDelay))
             portText = String(appStore.localServer.port)
+
+            // Show cached IDE statuses immediately (no flash on repeat visits)
+            if !appStore.cachedIDEStatuses.isEmpty {
+                ideStatuses = appStore.cachedIDEStatuses
+                ideExtensionInstalled = ideStatuses.contains { $0.isInstalled }
+            }
+
+            // Refresh in background — updates cache for next visit
+            let statuses = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: ExtensionInstaller.allIDEStatuses())
+                }
+            }
+            guard !Task.isCancelled else { return }
+            ideStatuses = statuses
+            ideExtensionInstalled = statuses.contains { $0.isInstalled }
+            appStore.cachedIDEStatuses = statuses
         }
         .alert("Uninstall Masko?", isPresented: $showUninstallConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -418,6 +476,7 @@ struct SettingsView: View {
                 DispatchQueue.main.async {
                     ideStatuses = statuses
                     ideExtensionInstalled = statuses.contains { $0.isInstalled }
+                    appStore.cachedIDEStatuses = statuses
                     ideExtensionEnabled = true
                     extensionBusy = false
                     ExtensionInstaller.triggerPermissionPrompt()
@@ -442,6 +501,7 @@ struct SettingsView: View {
                 DispatchQueue.main.async {
                     ideStatuses = statuses
                     ideExtensionInstalled = statuses.contains { $0.isInstalled }
+                    appStore.cachedIDEStatuses = statuses
                     ideExtensionEnabled = true
                     installingIDE = nil
                     ExtensionInstaller.triggerPermissionPrompt()
@@ -464,6 +524,7 @@ struct SettingsView: View {
             DispatchQueue.main.async {
                 ideStatuses = statuses
                 ideExtensionInstalled = false
+                appStore.cachedIDEStatuses = statuses
                 ideExtensionEnabled = false
                 extensionBusy = false
             }
@@ -533,10 +594,15 @@ struct SettingsView: View {
 struct ShortcutRecorderView: View {
     var hotkeyManager: GlobalHotkeyManager
     @State private var isRecording = false
+    @State private var keyMonitor: Any?
 
     var body: some View {
         Button {
-            isRecording.toggle()
+            if isRecording {
+                stopRecording()
+            } else {
+                startRecording()
+            }
         } label: {
             HStack(spacing: 4) {
                 if isRecording {
@@ -559,26 +625,45 @@ struct ShortcutRecorderView: View {
             )
         }
         .buttonStyle(.plain)
-        .onKeyPress { press in
-            guard isRecording else { return .ignored }
+        .onDisappear { stopRecording() }
+    }
 
-            // Build CGEventFlags from SwiftUI modifiers
+    private func startRecording() {
+        isRecording = true
+        hotkeyManager.shared.isRecording = true
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             var flags: CGEventFlags = []
-            if press.modifiers.contains(.command) { flags.insert(.maskCommand) }
-            if press.modifiers.contains(.shift) { flags.insert(.maskShift) }
-            if press.modifiers.contains(.control) { flags.insert(.maskControl) }
-            if press.modifiers.contains(.option) { flags.insert(.maskAlternate) }
+            if event.modifierFlags.contains(.command) { flags.insert(.maskCommand) }
+            if event.modifierFlags.contains(.shift) { flags.insert(.maskShift) }
+            if event.modifierFlags.contains(.control) { flags.insert(.maskControl) }
+            if event.modifierFlags.contains(.option) { flags.insert(.maskAlternate) }
 
             // Require at least one modifier
-            guard !flags.isEmpty else { return .ignored }
+            guard !flags.isEmpty else { return event }
+
+            // Escape cancels recording
+            if event.keyCode == 53 {
+                stopRecording()
+                return nil
+            }
 
             // Map character to key code
-            if let keyCode = characterToKeyCode(press.characters) {
+            let char = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            if let keyCode = characterToKeyCode(char) {
                 hotkeyManager.setShortcut(keyCode: keyCode, modifiers: flags)
-                isRecording = false
-                return .handled
+                stopRecording()
+                return nil
             }
-            return .ignored
+            return event
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        hotkeyManager.shared.isRecording = false
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
         }
     }
 }

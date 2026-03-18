@@ -4,12 +4,12 @@ import Foundation
 final class SessionSwitcherStore {
     private(set) var isActive = false
     private(set) var selectedIndex: Int = 0
-    private(set) var sessions: [ClaudeSession] = []
+    private(set) var sessions: [AgentSession] = []
 
     /// Called when user taps a row — AppStore wires this to focus terminal + dismiss.
-    var onTapConfirm: ((ClaudeSession) -> Void)?
+    var onTapConfirm: ((AgentSession) -> Void)?
 
-    func open(sessions: [ClaudeSession]) {
+    func open(sessions: [AgentSession]) {
         // Running sessions first, then by most recently active.
         self.sessions = sessions.sorted {
             if $0.phase == .running && $1.phase != .running { return true }
@@ -35,12 +35,12 @@ final class SessionSwitcherStore {
         selectedIndex = index
     }
 
-    var selectedSession: ClaudeSession? {
+    var selectedSession: AgentSession? {
         guard isActive, selectedIndex >= 0, selectedIndex < sessions.count else { return nil }
         return sessions[selectedIndex]
     }
 
-    func confirm() -> ClaudeSession? {
+    func confirm() -> AgentSession? {
         guard isActive else { return nil }
         let session = selectedSession
         close()
@@ -57,7 +57,7 @@ final class SessionSwitcherStore {
     }
 
     /// Refresh the session list while keeping the current selection if possible.
-    func refresh(sessions: [ClaudeSession]) {
+    func refresh(sessions: [AgentSession]) {
         guard isActive else { return }
         let previousId = selectedSession?.id
         self.sessions = sessions.sorted {

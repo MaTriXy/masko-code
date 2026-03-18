@@ -334,7 +334,7 @@ private struct EdgeRow: View {
     private var conditionColor: Color {
         guard let conditions = edge.conditions, !conditions.isEmpty else { return Constants.textMuted }
         let firstInput = conditions[0].input
-        if firstInput.hasPrefix("claudeCode::") { return Color(red: 139/255, green: 92/255, blue: 246/255) } // Claude Code = purple
+        if firstInput.hasPrefix(OverlayStateMachine.agentPrefix) || firstInput.hasPrefix(OverlayStateMachine.legacyPrefix) { return Color(red: 139/255, green: 92/255, blue: 246/255) } // Agent input = purple
         if firstInput == "clicked" { return Constants.orangePrimary }
         if firstInput == "nodeTime" { return Color(red: 59/255, green: 130/255, blue: 246/255) }   // blue
         if firstInput == "loopCount" { return Color(red: 22/255, green: 163/255, blue: 74/255) }   // green
@@ -360,21 +360,21 @@ private struct ConditionEditorRow: View {
             MaskoAnimationCondition(input: "mouseOver", op: "==", value: .bool(true)),
         ]),
         ("Working", [
-            MaskoAnimationCondition(input: "claudeCode::isWorking", op: "==", value: .bool(true)),
-            MaskoAnimationCondition(input: "claudeCode::isAlert", op: "==", value: .bool(false)),
-            MaskoAnimationCondition(input: "claudeCode::isCompacting", op: "==", value: .bool(false)),
+            MaskoAnimationCondition(input: "agent::isWorking", op: "==", value: .bool(true)),
+            MaskoAnimationCondition(input: "agent::isAlert", op: "==", value: .bool(false)),
+            MaskoAnimationCondition(input: "agent::isCompacting", op: "==", value: .bool(false)),
         ]),
         ("Idle", [
-            MaskoAnimationCondition(input: "claudeCode::isIdle", op: "==", value: .bool(true)),
-            MaskoAnimationCondition(input: "claudeCode::isAlert", op: "==", value: .bool(false)),
-            MaskoAnimationCondition(input: "claudeCode::isCompacting", op: "==", value: .bool(false)),
+            MaskoAnimationCondition(input: "agent::isIdle", op: "==", value: .bool(true)),
+            MaskoAnimationCondition(input: "agent::isAlert", op: "==", value: .bool(false)),
+            MaskoAnimationCondition(input: "agent::isCompacting", op: "==", value: .bool(false)),
         ]),
         ("Alert", [
-            MaskoAnimationCondition(input: "claudeCode::isAlert", op: "==", value: .bool(true)),
+            MaskoAnimationCondition(input: "agent::isAlert", op: "==", value: .bool(true)),
         ]),
         ("Compacting", [
-            MaskoAnimationCondition(input: "claudeCode::isCompacting", op: "==", value: .bool(true)),
-            MaskoAnimationCondition(input: "claudeCode::isAlert", op: "==", value: .bool(false)),
+            MaskoAnimationCondition(input: "agent::isCompacting", op: "==", value: .bool(true)),
+            MaskoAnimationCondition(input: "agent::isAlert", op: "==", value: .bool(false)),
         ]),
     ]
 
@@ -385,7 +385,7 @@ private struct ConditionEditorRow: View {
         self.config = config
         self.onSave = onSave
         self.onCancel = onCancel
-        self._inputName = State(initialValue: edge.conditions?.first?.input ?? "claudeCode::isWorking")
+        self._inputName = State(initialValue: edge.conditions?.first?.input ?? "agent::isWorking")
     }
 
     private func nodeName(_ id: String) -> String {
