@@ -216,13 +216,20 @@ final class SessionStore {
                 changed = true
             }
         } else {
-            // 2. End individual sessions that are stale (no events in 10+ minutes).
+            // 2. End individual sessions that are stale (no events in 1+ hour).
             // A claude process exists for a different session — but these old ones are dead.
-            let staleThreshold: TimeInterval = 600 // 10 minutes
+            let staleThreshold: TimeInterval = 3600 // 1 hour
             let now = Date()
             for i in sessions.indices where sessions[i].status == .active {
                 if let lastEvent = sessions[i].lastEventAt,
                    now.timeIntervalSince(lastEvent) > staleThreshold {
+                    // Check if transcript was recently modified before killing
+                    if let path = sessions[i].transcriptPath,
+                       let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                       let modDate = attrs[.modificationDate] as? Date,
+                       now.timeIntervalSince(modDate) < 300 { // 5 min
+                        continue // transcript still active, skip
+                    }
                     sessions[i].status = .ended
                     sessions[i].phase = .idle
                     sessions[i].activeSubagentCount = 0
