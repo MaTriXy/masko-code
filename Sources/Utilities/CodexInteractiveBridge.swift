@@ -20,6 +20,48 @@ enum CodexInteractiveBridge {
         ["-f", "Codex Desktop"],
     ]
 
+    struct TerminalContext {
+        let terminalPid: Int
+        let shellPid: Int?
+    }
+
+    /// Resolve the terminal app PID and shell PID for a Codex process matching the given project dir.
+    /// Returns nil if no matching Codex process is found.
+    static func resolveTerminalContext(projectDir: String?) -> TerminalContext? {
+        let infos = runningCodexProcesses()
+        guard !infos.isEmpty else { return nil }
+
+        // Find matching Codex process by cwd
+        let target: ProcessInfo?
+        if let cwd = normalized(path: projectDir) {
+            let matched = infos.filter { normalized(path: $0.cwd) == cwd }
+            target = matched.count == 1 ? matched.first : matched.max(by: { $0.pid < $1.pid })
+        } else {
+            target = infos.count == 1 ? infos.first : nil
+        }
+        guard let codexPid = target?.pid else { return nil }
+
+        // Walk up process tree to find shell and terminal app
+        var shellPid: Int?
+        var current = codexPid
+        for _ in 0..<20 {
+            let ppidStr = runCommand("/bin/ps", arguments: ["-o", "ppid=", "-p", "\(current)"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let ppid = Int(ppidStr), ppid > 1 else { break }
+            let comm = runCommand("/bin/ps", arguments: ["-o", "comm=", "-p", "\(ppid)"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (comm as NSString).lastPathComponent
+            if shellNames.contains(name) {
+                shellPid = ppid
+            }
+            if terminalAppNames.contains(name) {
+                return TerminalContext(terminalPid: ppid, shellPid: shellPid)
+            }
+            current = ppid
+        }
+        return nil
+    }
+
     static func focus(
         event: AgentEvent,
         processInfos: [ProcessInfo]? = nil,
@@ -120,8 +162,53 @@ enum CodexInteractiveBridge {
     }
 
     private static func defaultActivator(pid: Int) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else { return false }
-        return app.activate()
+        // Try direct activation first (works if pid is a GUI app like Codex Desktop)
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)), app.activate() {
+            return true
+        }
+        // Walk up the process tree to find the terminal/IDE app hosting the CLI
+        if let terminalPid = findTerminalAncestor(of: pid),
+           let app = NSRunningApplication(processIdentifier: pid_t(terminalPid)),
+           app.activate() {
+            return true
+        }
+        // Last resort: use IDETerminalFocus with the process cwd
+        let cwd = cwdForPid(pid)
+        if let cwd {
+            IDETerminalFocus.focus(projectDir: cwd)
+            return true
+        }
+        return false
+    }
+
+    private static let shellNames: Set<String> = [
+        "zsh", "bash", "fish", "sh", "nu", "pwsh", "elvish",
+        "-zsh", "-bash", "-fish", "-sh",
+    ]
+
+    /// Walk up the process tree from a CLI PID to find the enclosing terminal/IDE app.
+    private static let terminalAppNames: Set<String> = [
+        "Terminal", "iTerm2", "wezterm-gui", "kitty", "Cursor", "Code",
+        "Windsurf", "ghostty", "alacritty", "Warp", "Zed",
+        "pycharm", "idea", "webstorm", "goland", "clion", "phpstorm",
+        "rubymine", "rider",
+    ]
+
+    private static func findTerminalAncestor(of pid: Int) -> Int? {
+        var current = pid
+        for _ in 0..<20 { // safety limit
+            let ppidStr = runCommand("/bin/ps", arguments: ["-o", "ppid=", "-p", "\(current)"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let ppid = Int(ppidStr), ppid > 1 else { return nil }
+            let comm = runCommand("/bin/ps", arguments: ["-o", "comm=", "-p", "\(ppid)"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (comm as NSString).lastPathComponent
+            if terminalAppNames.contains(name) {
+                return ppid
+            }
+            current = ppid
+        }
+        return nil
     }
 
     private static func runCommand(_ launchPath: String, arguments: [String]) -> String {

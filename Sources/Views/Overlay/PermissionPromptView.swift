@@ -240,18 +240,15 @@ func focusTerminal(
     let resolvedDir = matchedSession?.projectDir ?? projectDir
     let resolvedSource = matchedSession?.agentSource ?? AgentSource(rawSource: source)
 
-    if pid == nil, shellPid == nil, resolvedSource == .codex {
-        let event = AgentEvent(
-            hookEventName: HookEventType.permissionRequest.rawValue,
-            sessionId: sessionId,
-            cwd: resolvedDir,
-            source: source ?? "codex"
-        )
-        if CodexInteractiveBridge.focus(event: event) {
-            return
+    var resolvedPid = pid
+    var resolvedShellPid = shellPid
+    if resolvedPid == nil, resolvedSource == .codex {
+        if let ctx = CodexInteractiveBridge.resolveTerminalContext(projectDir: resolvedDir) {
+            resolvedPid = ctx.terminalPid
+            resolvedShellPid = ctx.shellPid
         }
     }
-    IDETerminalFocus.focus(terminalPid: pid, shellPid: shellPid, projectDir: resolvedDir)
+    IDETerminalFocus.focus(terminalPid: resolvedPid, shellPid: resolvedShellPid, projectDir: resolvedDir)
 }
 
 // MARK: - AskUserQuestion View
@@ -1136,13 +1133,15 @@ private struct CollapsedPermissionPill: View {
 
             Spacer(minLength: 0)
 
-            Button { focusTerminal(pid: permission.event.terminalPid, shellPid: permission.event.shellPid, projectDir: permission.event.cwd, sessionId: permission.event.sessionId, source: permission.event.source, sessions: sessionStore.sessions) } label: {
-                Image(systemName: "terminal.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(OverlayStyle.textHint)
+            if !isOpenTerminalFallback {
+                Button { focusTerminal(pid: permission.event.terminalPid, shellPid: permission.event.shellPid, projectDir: permission.event.cwd, sessionId: permission.event.sessionId, source: permission.event.source, sessions: sessionStore.sessions) } label: {
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(OverlayStyle.textHint)
+                }
+                .buttonStyle(.plain)
+                .help("Open terminal")
             }
-            .buttonStyle(.plain)
-            .help("Open terminal")
 
             if showShortcuts { ActionBadge(label: hotkeyManager.shortcutLabel) }
 
@@ -1158,22 +1157,19 @@ private struct CollapsedPermissionPill: View {
 
             if isOpenTerminalFallback {
                 Button {
-                    focusTerminal(
-                        pid: permission.event.terminalPid,
-                        shellPid: permission.event.shellPid,
-                        projectDir: permission.event.cwd,
-                        sessionId: permission.event.sessionId,
-                        source: permission.event.source,
-                        sessions: sessionStore.sessions
-                    )
+                    permission.transport.sendDecision(.allow)
                 } label: {
-                    Text("Open Terminal")
-                        .font(Constants.heading(size: 9, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(OverlayStyle.orange)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    HStack(spacing: 3) {
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 8))
+                        Text("Open Terminal")
+                            .font(Constants.heading(size: 9, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(OverlayStyle.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
                 .buttonStyle(.plain)
             } else {
