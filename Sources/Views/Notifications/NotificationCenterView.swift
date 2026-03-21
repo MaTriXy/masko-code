@@ -66,13 +66,79 @@ struct NotificationCenterView: View {
             }
         }
         .background(Constants.lightBackground)
-        .alert("Clear All Notifications", isPresented: $showClearAllConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear All", role: .destructive) {
-                appStore.notificationStore.clearAll()
+        .overlay {
+            if showClearAllConfirmation {
+                ClearAllConfirmationDialog(
+                    onConfirm: {
+                        appStore.notificationStore.clearAll()
+                        showClearAllConfirmation = false
+                    },
+                    onCancel: {
+                        showClearAllConfirmation = false
+                    }
+                )
             }
-        } message: {
-            Text("This will permanently delete all notifications. This action cannot be undone.")
+        }
+    }
+}
+
+// MARK: - Clear All Confirmation Dialog
+
+private struct ClearAllConfirmationDialog: View {
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.3)
+                .ignoresSafeArea()
+                .onTapGesture { onCancel() }
+
+            VStack(spacing: 16) {
+                Image(systemName: "trash")
+                    .font(.system(size: 28))
+                    .foregroundColor(Constants.destructiveRed)
+
+                Text("Clear All Notifications")
+                    .font(Constants.heading(size: 16, weight: .semibold))
+                    .foregroundColor(Constants.textPrimary)
+
+                Text("This will permanently delete all notifications.")
+                    .font(Constants.body(size: 13))
+                    .foregroundColor(Constants.textMuted)
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 12) {
+                    Button("Cancel") { onCancel() }
+                        .buttonStyle(.plain)
+                        .font(Constants.body(size: 13, weight: .medium))
+                        .foregroundColor(Constants.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: Constants.cornerRadius)
+                                .stroke(Constants.border, lineWidth: 1)
+                        )
+
+                    Button("Clear All") { onConfirm() }
+                        .buttonStyle(.plain)
+                        .font(Constants.body(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: Constants.cornerRadius)
+                                .fill(Constants.destructiveRed)
+                        )
+                }
+            }
+            .padding(24)
+            .frame(width: 320)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Constants.surfaceWhite)
+                    .shadow(color: .black.opacity(0.15), radius: 20, y: 8)
+            )
         }
     }
 }
