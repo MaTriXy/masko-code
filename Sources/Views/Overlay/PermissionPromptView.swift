@@ -236,9 +236,13 @@ func focusTerminal(
     source: String? = nil,
     sessions: [AgentSession] = []
 ) {
-    let matchedSession = sessions.first(where: { $0.id == sessionId })
-    let resolvedDir = matchedSession?.projectDir ?? projectDir
-    let resolvedSource = matchedSession?.agentSource ?? AgentSource(rawSource: source)
+    if let matchedSession = sessions.first(where: { $0.id == sessionId }) {
+        IDETerminalFocus.focusSession(matchedSession)
+        return
+    }
+
+    let resolvedDir = projectDir
+    let resolvedSource = AgentSource(rawSource: source)
 
     var resolvedPid = pid
     var resolvedShellPid = shellPid

@@ -129,6 +129,15 @@ final class AppStore {
                         )
                     }
 
+                    // Codex approvals answered in the terminal can emit follow-up events
+                    // (for example a second PreToolUse/exec begin) before the tool completes.
+                    // If we see any later non-permission event for the same toolUseId, the
+                    // approval card is stale and should close immediately.
+                    if eventType != .permissionRequest,
+                       let toolUseId = event.toolUseId {
+                        self.pendingPermissionStore.dismissByToolUseId(sessionId: sid, toolUseId: toolUseId)
+                    }
+
                     if [.stop, .userPromptSubmit].contains(eventType),
                        self.pendingPermissionStore.pending.contains(where: {
                            $0.event.sessionId == sid && $0.event.agentId == event.agentId

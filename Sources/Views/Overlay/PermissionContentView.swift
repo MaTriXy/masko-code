@@ -52,7 +52,7 @@ struct PermissionContentView: View {
     private var hintFont: CGFloat { 8 }
     private var outerPadding: CGFloat { isExpanded ? 24 : 8 }
     private var innerSpacing: CGFloat { isExpanded ? 12 : 5 }
-    private var buttonPaddingH: CGFloat { isExpanded ? 20 : 0 }
+    private var buttonPaddingH: CGFloat { isExpanded ? 20 : 12 }
     private var buttonPaddingV: CGFloat { isExpanded ? 8 : 4 }
     private var contentMaxHeight: CGFloat? { isExpanded ? nil : (isPlan ? 160 : 300) }
 
@@ -484,33 +484,38 @@ struct PermissionContentView: View {
     }
 
     private var terminalFallbackActionsView: some View {
-        HStack(spacing: isExpanded ? 10 : 6) {
+        HStack(spacing: isExpanded ? 10 : 8) {
             Text("Reply in terminal")
                 .font(Constants.body(size: isExpanded ? 12 : 10, weight: .medium))
                 .foregroundStyle(OverlayStyle.textMuted)
-            Spacer()
-            Button {
-                focusTerminal(
-                    pid: permission.event.terminalPid,
-                    shellPid: permission.event.shellPid,
-                    projectDir: permission.event.cwd,
-                    sessionId: permission.event.sessionId,
-                    sessions: sessionStore.sessions
-                )
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "terminal.fill")
-                    Text("Open Terminal")
-                        .font(Constants.heading(size: buttonFont, weight: .semibold))
-                }
-                .foregroundStyle(.white)
-                .padding(.vertical, buttonPaddingV)
-                .padding(.horizontal, buttonPaddingH)
-                .background(OverlayStyle.orange)
-                .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 8 : 7))
-            }
-            .buttonStyle(.plain)
+
+            terminalFallbackButton
         }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var terminalFallbackButton: some View {
+        Button {
+            focusTerminal(
+                pid: permission.event.terminalPid,
+                shellPid: permission.event.shellPid,
+                projectDir: permission.event.cwd,
+                sessionId: permission.event.sessionId,
+                sessions: sessionStore.sessions
+            )
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "terminal.fill")
+                Text("Open Terminal")
+                    .font(Constants.heading(size: buttonFont, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.vertical, buttonPaddingV)
+            .padding(.horizontal, buttonPaddingH)
+            .background(OverlayStyle.orange)
+            .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 8 : 7))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: Plan Actions

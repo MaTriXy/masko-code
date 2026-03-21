@@ -74,14 +74,6 @@ final class CodexAdapter: AgentAdapter {
             return true
         }
 
-        // request_user_input completions should not auto-dismiss mirrored AskUserQuestion cards.
-        if eventType == .postToolUse || eventType == .postToolUseFailure {
-            let toolName = (event.toolName ?? "").lowercased()
-            if toolName == "request_user_input" || toolName == "askuserquestion" {
-                return true
-            }
-        }
-
         return false
     }
 }
