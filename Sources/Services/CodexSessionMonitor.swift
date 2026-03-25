@@ -25,6 +25,7 @@ final class CodexSessionMonitor {
     private var trackedFiles: [String: TrackedFile] = [:]
     private var sessionContexts: [String: CodexSessionContext] = [:]
     private var pollSource: DispatchSourceTimer?
+    private var isBootstrapping = false
 
     var isRunning: Bool { pollSource != nil }
 
@@ -44,7 +45,9 @@ final class CodexSessionMonitor {
 
     func start(bootstrapRecentFiles: Bool = true) {
         guard pollSource == nil else { return }
+        isBootstrapping = true
         bootstrapExistingFiles(bootstrapRecentFiles: bootstrapRecentFiles)
+        isBootstrapping = false
         let source = DispatchSource.makeTimerSource(queue: .main)
         source.schedule(deadline: .now() + pollInterval, repeating: pollInterval)
         source.setEventHandler { [weak self] in
@@ -202,6 +205,9 @@ final class CodexSessionMonitor {
         }
 
         for event in result.events {
+            // Skip transient phase events during bootstrap - they represent
+            // momentary states (compacting) that are meaningless when replayed.
+            if isBootstrapping, event.eventType == .preCompact { continue }
             onEventReceived?(event)
         }
     }

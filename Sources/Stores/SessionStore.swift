@@ -13,11 +13,12 @@ struct AgentSession: Identifiable, Codable {
     var lastEventAt: Date?
     var lastToolName: String?
     var activeSubagentCount: Int = 0
-    var isCompacting: Bool = false
     var terminalPid: Int?
     var terminalBundleId: String?
     var shellPid: Int?
     var transcriptPath: String?
+
+    var isCompacting: Bool { phase == .compacting }
 
     init(
         id: String,
@@ -31,7 +32,6 @@ struct AgentSession: Identifiable, Codable {
         lastEventAt: Date?,
         lastToolName: String? = nil,
         activeSubagentCount: Int = 0,
-        isCompacting: Bool = false,
         terminalPid: Int? = nil,
         shellPid: Int? = nil,
         transcriptPath: String? = nil
@@ -47,7 +47,6 @@ struct AgentSession: Identifiable, Codable {
         self.lastEventAt = lastEventAt
         self.lastToolName = lastToolName
         self.activeSubagentCount = activeSubagentCount
-        self.isCompacting = isCompacting
         self.terminalPid = terminalPid
         self.shellPid = shellPid
         self.transcriptPath = transcriptPath
@@ -80,7 +79,6 @@ struct AgentSession: Identifiable, Codable {
         case lastEventAt
         case lastToolName
         case activeSubagentCount
-        case isCompacting
         case terminalPid
         case shellPid
         case transcriptPath
@@ -109,7 +107,6 @@ struct AgentSession: Identifiable, Codable {
         lastEventAt = try container.decodeIfPresent(Date.self, forKey: .lastEventAt)
         lastToolName = try container.decodeIfPresent(String.self, forKey: .lastToolName)
         activeSubagentCount = try container.decodeIfPresent(Int.self, forKey: .activeSubagentCount) ?? 0
-        isCompacting = try container.decodeIfPresent(Bool.self, forKey: .isCompacting) ?? false
         terminalPid = try container.decodeIfPresent(Int.self, forKey: .terminalPid)
         shellPid = try container.decodeIfPresent(Int.self, forKey: .shellPid)
         transcriptPath = try container.decodeIfPresent(String.self, forKey: .transcriptPath)
@@ -141,6 +138,13 @@ final class SessionStore {
 
     init() {
         sessions = LocalStorage.load([AgentSession].self, from: Self.filename) ?? []
+        // On launch, no session can be mid-compact - reset any stale compacting phase
+        var needsPersist = false
+        for i in sessions.indices where sessions[i].phase == .compacting {
+            sessions[i].phase = .idle
+            needsPersist = true
+        }
+        if needsPersist { persist() }
         reconcileIfNeeded()
         startReconcileTimer()
         startInterruptWatcher()
@@ -194,7 +198,6 @@ final class SessionStore {
                           self.sessions[candidate.index].id == candidate.id,
                           self.sessions[candidate.index].phase == .running else { continue }
                     self.sessions[candidate.index].phase = .idle
-                    self.sessions[candidate.index].isCompacting = false
                     changed = true
                     print("[masko-desktop] Interrupt detected for session \(candidate.id) via transcript")
                 }
@@ -305,7 +308,6 @@ final class SessionStore {
                 sessions[i].status = .ended
                 sessions[i].phase = .idle
                 sessions[i].activeSubagentCount = 0
-                sessions[i].isCompacting = false
                 changed = true
             }
         } else {
@@ -326,7 +328,6 @@ final class SessionStore {
                     sessions[i].status = .ended
                     sessions[i].phase = .idle
                     sessions[i].activeSubagentCount = 0
-                    sessions[i].isCompacting = false
                     changed = true
                 }
             }
@@ -389,7 +390,7 @@ final class SessionStore {
     }
 
     var totalCompactCount: Int {
-        activeSessions.filter { $0.isCompacting }.count
+        activeSessions.filter { $0.phase == .compacting }.count
     }
 
     // MARK: - Event Recording
@@ -426,8 +427,8 @@ final class SessionStore {
                 ]
                 if let eventType = event.eventType, reactivatingEvents.contains(eventType) {
                     sessions[index].status = .active
-                    sessions[index].phase = (eventType == .sessionStart) ? .idle : .running
-                    sessions[index].isCompacting = eventType == .preCompact
+                    sessions[index].phase = (eventType == .preCompact) ? .compacting
+                        : (eventType == .sessionStart) ? .idle : .running
                     sessions[index].activeSubagentCount = 0
                 } else {
                     // Truly stale event (e.g. Stop, SessionEnd) — count it but skip transitions
@@ -441,7 +442,6 @@ final class SessionStore {
             case .sessionStart:
                 sessions[index].status = .active
                 sessions[index].phase = .idle
-                sessions[index].isCompacting = false
                 if let pid = event.terminalPid {
                     sessions[index].terminalPid = pid
                     sessions[index].terminalBundleId = Self.resolveBundleId(pid: pid)
@@ -459,17 +459,14 @@ final class SessionStore {
 
             case .preCompact:
                 sessions[index].phase = .compacting
-                sessions[index].isCompacting = true
 
             case .stop:
                 sessions[index].phase = .idle
-                sessions[index].isCompacting = false
 
             case .sessionEnd:
                 sessions[index].status = .ended
                 sessions[index].phase = .idle
                 sessions[index].activeSubagentCount = 0
-                sessions[index].isCompacting = false
                 activeSubagentIds.removeValue(forKey: sessionId)
                 onPhasesChanged?()
 

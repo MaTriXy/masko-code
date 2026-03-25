@@ -347,7 +347,7 @@ final class OverlayManager {
             guard let sid = perm.event.sessionId else { return false }
             return activeSessionIds.contains(sid)
         }
-        let isCompacting = active.contains { $0.isCompacting }
+        let isCompacting = active.contains { $0.phase == .compacting }
         let sessionCount = active.count
 
         sm.setAgentStateInput("isWorking", .bool(isWorking))

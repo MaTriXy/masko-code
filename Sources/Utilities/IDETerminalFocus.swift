@@ -36,6 +36,12 @@ enum IDETerminalFocus {
             bundleId = savedBundleId
         }
 
+        // Claude Desktop: activate the app window
+        if bundleId == "com.anthropic.claudefordesktop" {
+            activateApp(bundleId: "com.anthropic.claudefordesktop")
+            return
+        }
+
         // Try IDE extension for exact terminal tab focus
         if let shellPid,
            let bundleId,
@@ -134,6 +140,7 @@ enum IDETerminalFocus {
             "com.jetbrains.PhpStorm",
             "com.jetbrains.rubymine",
             "com.jetbrains.rider",
+            "com.anthropic.claudefordesktop",
         ]
         for id in bundleIDs {
             if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == id }) {
