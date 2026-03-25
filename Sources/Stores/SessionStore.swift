@@ -471,6 +471,7 @@ final class SessionStore {
                 onPhasesChanged?()
 
             case .subagentStart:
+                sessions[index].phase = .running
                 if let agentId = event.agentId {
                     var ids = activeSubagentIds[sessionId] ?? []
                     ids.insert(agentId)
@@ -481,6 +482,7 @@ final class SessionStore {
                 }
 
             case .subagentStop:
+                sessions[index].phase = .running
                 if let agentId = event.agentId {
                     activeSubagentIds[sessionId]?.remove(agentId)
                     sessions[index].activeSubagentCount = activeSubagentIds[sessionId]?.count ?? 0
