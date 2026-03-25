@@ -460,7 +460,10 @@ final class SessionStore {
             case .preCompact:
                 sessions[index].phase = .compacting
 
-            case .stop:
+            case .postCompact:
+                sessions[index].phase = .running
+
+            case .stop, .stopFailure:
                 sessions[index].phase = .idle
 
             case .sessionEnd:
