@@ -201,6 +201,7 @@ struct ConnectionDoctorView: View {
         }
         .frame(width: 420)
         .background(Constants.lightBackground)
+        .onExitCommand { dismiss() }
         .task {
             let doc = ConnectionDoctor(localServer: appStore.localServer)
             doctor = doc
