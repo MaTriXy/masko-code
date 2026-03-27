@@ -1,5 +1,9 @@
 import SwiftUI
 
+extension Notification.Name {
+    static let openConnectionDoctor = Notification.Name("openConnectionDoctor")
+}
+
 enum Constants {
     private static let serverPortKey = "serverPort"
 
