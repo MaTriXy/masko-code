@@ -19,9 +19,13 @@ final class ConnectionDoctor {
     private(set) var isRepairing = false
 
     private let localServer: LocalServer
+    private let eventStore: EventStore
+    private let sessionStore: SessionStore
 
-    init(localServer: LocalServer) {
+    init(localServer: LocalServer, eventStore: EventStore, sessionStore: SessionStore) {
         self.localServer = localServer
+        self.eventStore = eventStore
+        self.sessionStore = sessionStore
     }
 
     // MARK: - Diagnostics
@@ -46,8 +50,16 @@ final class ConnectionDoctor {
         checks.append(checkScriptVersion())
 
         // 6. End-to-end health check
-        let healthResult = await checkHealthEndpoint()
-        checks.append(healthResult)
+        checks.append(await checkHealthEndpoint())
+
+        // 7. Claude Code process running
+        checks.append(checkClaudeCodeProcess())
+
+        // 8. End-to-end hook delivery test
+        checks.append(await checkHookDelivery())
+
+        // 9. Last event received
+        checks.append(checkLastEvent())
 
         isRunning = false
     }
@@ -173,7 +185,6 @@ final class ConnectionDoctor {
             )
         }
 
-        // Extract port from: curl ... "http://localhost:XXXXX/health"
         let pattern = "http://localhost:(\\d+)/health"
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
@@ -220,7 +231,6 @@ final class ConnectionDoctor {
             )
         }
 
-        // Extract version from: # version: NN
         let pattern = "# version: (\\d+)"
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
@@ -235,7 +245,6 @@ final class ConnectionDoctor {
             )
         }
 
-        // HookInstaller embeds a version constant; reinstalling will update it
         return Check(
             id: "script_version",
             name: "Script Version",
@@ -280,6 +289,185 @@ final class ConnectionDoctor {
         }
     }
 
+    private func checkClaudeCodeProcess() -> Check {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-x", "claude"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        var found: [String] = []
+
+        if (try? process.run()) != nil {
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                found.append("claude")
+            }
+        }
+
+        // Also check for codex
+        let codexProcess = Process()
+        codexProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        codexProcess.arguments = ["-x", "codex"]
+        codexProcess.standardOutput = Pipe()
+        codexProcess.standardError = Pipe()
+
+        if (try? codexProcess.run()) != nil {
+            codexProcess.waitUntilExit()
+            if codexProcess.terminationStatus == 0 {
+                found.append("codex")
+            }
+        }
+
+        if !found.isEmpty {
+            return Check(
+                id: "claude_process",
+                name: "Claude Code Process",
+                status: .ok,
+                message: "Running: \(found.joined(separator: ", "))",
+                canAutoFix: false
+            )
+        }
+
+        return Check(
+            id: "claude_process",
+            name: "Claude Code Process",
+            status: .warning,
+            message: "No claude or codex process detected",
+            canAutoFix: false
+        )
+    }
+
+    /// Pipes a test event through the hook script and checks if the server receives it.
+    private func checkHookDelivery() async -> Check {
+        let scriptPath = NSHomeDirectory() + "/.masko-desktop/hooks/hook-sender.sh"
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
+            return Check(
+                id: "hook_delivery",
+                name: "Hook Delivery",
+                status: .error,
+                message: "Hook script not found, cannot test",
+                canAutoFix: true
+            )
+        }
+
+        guard localServer.isRunning else {
+            return Check(
+                id: "hook_delivery",
+                name: "Hook Delivery",
+                status: .error,
+                message: "Server offline, cannot test delivery",
+                canAutoFix: true
+            )
+        }
+
+        let testId = UUID().uuidString
+
+        // Run hook script with a test event
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptPath]
+
+        let inputPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = Pipe()
+        process.standardError = stderrPipe
+
+        let testPayload = """
+        {"hook_event_name":"Notification","message":"masko-doctor-test-\(testId)","session_id":"doctor-test"}
+        """
+
+        do {
+            try process.run()
+            inputPipe.fileHandleForWriting.write(testPayload.data(using: .utf8)!)
+            inputPipe.fileHandleForWriting.closeFile()
+            process.waitUntilExit()
+        } catch {
+            return Check(
+                id: "hook_delivery",
+                name: "Hook Delivery",
+                status: .error,
+                message: "Failed to run hook script: \(error.localizedDescription)",
+                canAutoFix: true
+            )
+        }
+
+        // Check stderr for clues
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrStr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if process.terminationStatus != 0 {
+            return Check(
+                id: "hook_delivery",
+                name: "Hook Delivery",
+                status: .error,
+                message: "Hook script exited with code \(process.terminationStatus)\(stderrStr.isEmpty ? "" : ": \(stderrStr)")",
+                canAutoFix: true
+            )
+        }
+
+        // Wait for the event to be processed
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        // Look for our specific test event by matching the unique ID in the message
+        let found = eventStore.events.contains { event in
+            event.hookEventName == "Notification" &&
+            (event.message?.contains("masko-doctor-test-\(testId)") ?? false)
+        }
+
+        if found {
+            return Check(
+                id: "hook_delivery",
+                name: "Hook Delivery",
+                status: .ok,
+                message: "Test event delivered and received",
+                canAutoFix: false
+            )
+        }
+
+        return Check(
+            id: "hook_delivery",
+            name: "Hook Delivery",
+            status: .error,
+            message: "Hook script ran but event not received by server\(stderrStr.isEmpty ? "" : " (stderr: \(stderrStr))")",
+            canAutoFix: false
+        )
+    }
+
+    private func checkLastEvent() -> Check {
+        guard let lastEvent = eventStore.events.last else {
+            return Check(
+                id: "last_event",
+                name: "Last Event",
+                status: .warning,
+                message: "No events received yet",
+                canAutoFix: false
+            )
+        }
+
+        let age = Date().timeIntervalSince(lastEvent.receivedAt)
+        let ageStr: String
+        if age < 60 {
+            ageStr = "\(Int(age))s ago"
+        } else if age < 3600 {
+            ageStr = "\(Int(age / 60))m ago"
+        } else {
+            ageStr = "\(Int(age / 3600))h ago"
+        }
+
+        let status: Check.Status = age < 300 ? .ok : (age < 3600 ? .warning : .error)
+
+        return Check(
+            id: "last_event",
+            name: "Last Event",
+            status: status,
+            message: "\(lastEvent.hookEventName) - \(ageStr) (\(eventStore.events.count) total)",
+            canAutoFix: false
+        )
+    }
+
     // MARK: - Repair
 
     func repairAll() async {
@@ -288,14 +476,18 @@ final class ConnectionDoctor {
         // 1. Restart server if not running
         if !localServer.isRunning {
             localServer.restart(port: localServer.port)
-            // Give it a moment to bind
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        // 2. Reinstall hooks + regenerate script (fixes hooks, script, port, version)
+        // 2. Force-delete hook script so ensureScriptExists() regenerates it
+        //    (otherwise it skips if version + port match)
+        let scriptPath = NSHomeDirectory() + "/.masko-desktop/hooks/hook-sender.sh"
+        try? FileManager.default.removeItem(atPath: scriptPath)
+
+        // 3. Reinstall hooks + regenerate script from scratch
         try? HookInstaller.install()
 
-        // 3. Re-run diagnostics to verify
+        // 4. Re-run diagnostics to verify
         await runDiagnostics()
 
         isRepairing = false
@@ -317,11 +509,21 @@ final class ConnectionDoctor {
         let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
 
+        // Last event age
+        let lastEventAge: Int?
+        if let lastEvent = eventStore.events.last {
+            lastEventAge = Int(Date().timeIntervalSince(lastEvent.receivedAt))
+        } else {
+            lastEventAge = nil
+        }
+
         return [
             "app_version": "\(appVersion) (\(buildNumber))",
             "os_version": osVersion,
             "checks": checkPayloads,
-            "active_sessions": 0, // Could be wired to sessionStore if needed
+            "active_sessions": sessionStore.activeSessions.count,
+            "total_events": eventStore.events.count,
+            "last_event_age_seconds": lastEventAge as Any,
         ]
     }
 

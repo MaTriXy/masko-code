@@ -203,7 +203,11 @@ struct ConnectionDoctorView: View {
         .background(Constants.lightBackground)
         .onExitCommand { dismiss() }
         .task {
-            let doc = ConnectionDoctor(localServer: appStore.localServer)
+            let doc = ConnectionDoctor(
+                localServer: appStore.localServer,
+                eventStore: appStore.eventStore,
+                sessionStore: appStore.sessionStore
+            )
             doctor = doc
             await doc.runDiagnostics()
         }
