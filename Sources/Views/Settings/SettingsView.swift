@@ -376,12 +376,12 @@ struct SettingsView: View {
                             .font(.caption)
                     }
                 }
-                Link(destination: URL(string: Constants.githubRepoURL)!) {
+                Link(destination: URL(string: Constants.maskoBaseURL + "/community")!) {
                     HStack {
-                        Image(systemName: "star")
+                        Image(systemName: "sparkles")
                             .foregroundColor(Constants.orangePrimary)
                             .font(.system(size: 12))
-                        Text("Star on GitHub")
+                        Text("Browse Skins")
                             .foregroundColor(Constants.orangePrimary)
                         Spacer()
                         Image(systemName: "arrow.up.forward")
